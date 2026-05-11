@@ -671,7 +671,7 @@ run
   -> output remains in output tensor memory
 ```
 
-M1 实现说明：M1 Runtime 已实现二进制 SPK loader、顺序 executor 和 fp32 reference kernels。由于静态 memory plan 属于 M2，M1 的 `prepare` 阶段使用顺序 arena 分配所有非 weight tensor；M2 会替换为 compiler 写入的 Memory Plan Section。
+M1 实现说明：M1 Runtime 已实现二进制 SPK loader、顺序 executor 和 fp32 reference kernels。M2 已将 `prepare` 阶段切换为使用 compiler 写入的 arena offset，并通过 `activation_arena_bytes` 校验用户提供的 arena 大小。
 
 ### 10.3 Runtime 不应该做的事
 
@@ -845,6 +845,8 @@ Runtime 在星上端做：
 2. 对每个 tensor 设置 data = arena_base + offset。
 3. 推理过程中不对 activation tensor malloc/free。
 ```
+
+M2 实现状态：Compiler 已实现 naive baseline、best-fit planner、Memory Plan Section、memory_plan.csv 和 target memory budget check。Runtime 已按 Tensor Table 中的 offset 绑定非 weight tensor，并在 arena 不足时失败。
 
 ### 12.4 Tensor 生命周期
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from compiler.frontend.onnx_importer import import_onnx
 def test_m1_tiny_cnn_e2e(tmp_path: Path):
     model_path = tmp_path / "tiny_cnn.onnx"
     spk_path = tmp_path / "tiny_cnn.spk"
+    csv_path = tmp_path / "memory_plan.csv"
     input_path = tmp_path / "input.bin"
     output_path = tmp_path / "output.bin"
 
@@ -22,9 +24,22 @@ def test_m1_tiny_cnn_e2e(tmp_path: Path):
     graph = import_onnx(model_path)
     assert [node.op_type for node in graph.nodes] == ["Conv", "Relu", "MaxPool", "Flatten", "Gemm", "Softmax"]
     subprocess.run(
-        ["python", "-m", "spinnv2.compiler", "compile", str(model_path), "-o", str(spk_path)],
+        [
+            "python",
+            "-m",
+            "spinnv2.compiler",
+            "compile",
+            str(model_path),
+            "-o",
+            str(spk_path),
+            "--memory-plan-csv",
+            str(csv_path),
+        ],
         check=True,
     )
+    debug = json.loads(spk_path.with_suffix(".spk.json").read_text(encoding="utf-8"))
+    assert debug["memory"]["planned_activation_bytes"] < debug["memory"]["naive_activation_bytes"]
+    assert csv_path.exists()
 
     x = np.linspace(-1.0, 1.0, num=16, dtype=np.float32).reshape(1, 1, 4, 4)
     input_path.write_bytes(np.ascontiguousarray(x).tobytes())

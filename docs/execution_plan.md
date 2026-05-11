@@ -145,7 +145,7 @@ ONNX -> SIR -> SPK -> Runtime -> Output
 
 只支持 fp32 和 reference kernel。
 
-M1 的 Runtime 可以采用顺序 arena 分配所有非 weight tensor。真正的生命周期复用和 Memory Plan Section 在 M2 完成。
+M1 的 Runtime 可以采用顺序 arena 分配所有非 weight tensor。M2 已完成生命周期复用和 Memory Plan Section 后，Runtime 必须改为按 compiler 生成的 offset 绑定 tensor。
 
 ### 6.2 算子范围
 
@@ -257,6 +257,14 @@ runtime activation malloc count = 0
 | `memory_plan_conflict_count` | 0 |
 | `arena_oob_count` | 0 |
 | `target_budget_violation` | compiler 阶段发现 |
+
+M2 实现备注：
+
+```text
+Memory Plan Section 用于审计和调试。
+Runtime 快路径直接使用 TensorRecord.data_offset 作为 arena offset。
+权重 tensor 的 data_offset 仍表示 Weight section offset。
+```
 
 ### 7.5 消融实验
 

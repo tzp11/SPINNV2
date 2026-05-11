@@ -8,7 +8,7 @@ The project follows an ahead-of-time deployment route:
 ONNX -> SIR -> SPK -> lightweight Runtime / generated C
 ```
 
-Current status: M1 minimal ONNX -> SPK -> Runtime path.
+Current status: M2 static memory planning.
 
 ## M0 Smoke Checks
 
@@ -20,6 +20,12 @@ pytest tests/e2e
 cmake -S runtime -B build/runtime
 cmake --build build/runtime
 ctest --test-dir build/runtime
+```
+
+The compiler can also emit a memory-plan CSV:
+
+```bash
+python -m spinnv2.compiler compile model.onnx -o build/model.spk --memory-plan-csv build/memory_plan.csv
 ```
 
 If `pytest` is unavailable, the compiler unit tests can still run with:

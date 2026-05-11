@@ -8,6 +8,7 @@ from pathlib import Path
 
 from compiler.ir.graph import Graph, Node, Tensor
 from compiler.ir import types
+from compiler.planner.memory_plan import MemoryPlan, plan_memory, write_memory_plan_csv
 
 
 SPKV2_MAGIC = 0x32564B50
@@ -20,6 +21,7 @@ SECTION_TENSOR_TABLE = 3
 SECTION_NODE_TABLE = 4
 SECTION_ATTRIBUTES = 5
 SECTION_WEIGHTS = 6
+SECTION_MEMORY_PLAN = 7
 SECTION_STRING_TABLE = 10
 
 DTYPE_CODES = {types.DTYPE_FP32: 1}
@@ -36,6 +38,7 @@ MEMORY_CLASS_CODES = {
     types.ROLE_WEIGHT: 3,
     types.ROLE_ACTIVATION: 4,
     types.ROLE_CONSTANT: 3,
+    "EXTERNAL": 5,
 }
 OP_CODES = {
     "Add": 1,
@@ -52,11 +55,26 @@ SECTION_STRUCT = struct.Struct("<IIQQII")
 TENSOR_STRUCT = struct.Struct("<IHHHH8IQQII")
 NODE_STRUCT = struct.Struct("<IHHHH8I4IIIII")
 ATTR_STRUCT = struct.Struct("<Iii4i2i2i2i2if")
+MEMORY_PLAN_STRUCT = struct.Struct("<IHHIQQII")
 
 
-def write_spk(graph: Graph, out_path: str | Path, target_profile: dict) -> None:
+def write_spk(
+    graph: Graph,
+    out_path: str | Path,
+    target_profile: dict,
+    *,
+    memory_plan: MemoryPlan | None = None,
+    memory_plan_csv: str | Path | None = None,
+) -> None:
     out_path = Path(out_path)
     sections: list[tuple[int, bytes, int]] = []
+    if memory_plan is None:
+        memory_plan = plan_memory(
+            graph,
+            max_arena_bytes=int(target_profile["memory"]["activation_arena_max"]),
+        )
+    if memory_plan_csv is not None:
+        write_memory_plan_csv(memory_plan, memory_plan_csv)
 
     strings = _build_string_table(graph)
     weights, weight_offsets = _build_weights(graph)
@@ -64,10 +82,11 @@ def write_spk(graph: Graph, out_path: str | Path, target_profile: dict) -> None:
 
     sections.append((SECTION_METADATA, _metadata_bytes(graph), 1))
     sections.append((SECTION_TARGET_PROFILE, json.dumps(target_profile, sort_keys=True).encode("utf-8"), 1))
-    sections.append((SECTION_TENSOR_TABLE, _tensor_table_bytes(graph, strings.offsets, weight_offsets), 4))
+    sections.append((SECTION_TENSOR_TABLE, _tensor_table_bytes(graph, strings.offsets, weight_offsets, memory_plan), 4))
     sections.append((SECTION_NODE_TABLE, _node_table_bytes(graph, attr_offsets), 4))
     sections.append((SECTION_ATTRIBUTES, attrs, 4))
     sections.append((SECTION_WEIGHTS, weights, 16))
+    sections.append((SECTION_MEMORY_PLAN, _memory_plan_bytes(graph, memory_plan), 4))
     sections.append((SECTION_STRING_TABLE, strings.blob, 1))
 
     section_count = len(sections)
@@ -99,7 +118,7 @@ def write_spk(graph: Graph, out_path: str | Path, target_profile: dict) -> None:
         len(graph.inputs),
         len(graph.outputs),
         sum(t.size_bytes for t in graph.tensors if t.role == types.ROLE_WEIGHT),
-        0,
+        memory_plan.planned_activation_bytes,
         0,
         _stable_profile_hash(target_profile),
         0,
@@ -108,7 +127,7 @@ def write_spk(graph: Graph, out_path: str | Path, target_profile: dict) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(header + bytes(directory) + bytes(payload))
     out_path.with_suffix(out_path.suffix + ".json").write_text(
-        json.dumps(_debug_json(graph), ensure_ascii=False, indent=2),
+        json.dumps(_debug_json(graph, memory_plan), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -191,23 +210,49 @@ def _attr_bytes(node: Node) -> bytes:
     )
 
 
-def _tensor_table_bytes(graph: Graph, string_offsets: dict[str, int], weight_offsets: dict[int, int]) -> bytes:
+def _tensor_table_bytes(
+    graph: Graph,
+    string_offsets: dict[str, int],
+    weight_offsets: dict[int, int],
+    memory_plan: MemoryPlan,
+) -> bytes:
     blob = bytearray()
     for tensor in graph.tensors:
         shape = tensor.shape[:8] + [1] * (8 - len(tensor.shape))
-        data_offset = weight_offsets.get(tensor.id, 0)
+        plan_entry = memory_plan.entries[tensor.id]
+        data_offset = weight_offsets.get(tensor.id, plan_entry.offset)
+        memory_class = _memory_class_code(plan_entry.memory_class)
         blob.extend(
             TENSOR_STRUCT.pack(
                 tensor.id,
                 DTYPE_CODES[tensor.dtype],
                 ROLE_CODES[tensor.role],
                 len(tensor.shape),
-                MEMORY_CLASS_CODES[tensor.role],
+                memory_class,
                 *shape,
                 tensor.size_bytes,
                 data_offset,
                 string_offsets[tensor.name],
                 0,
+            )
+        )
+    return bytes(blob)
+
+
+def _memory_plan_bytes(graph: Graph, memory_plan: MemoryPlan) -> bytes:
+    blob = bytearray()
+    for tensor in graph.tensors:
+        entry = memory_plan.entries[tensor.id]
+        blob.extend(
+            MEMORY_PLAN_STRUCT.pack(
+                entry.tensor_id,
+                _memory_class_code(entry.memory_class),
+                16,
+                0,
+                entry.offset,
+                entry.size,
+                entry.first_use if entry.first_use >= 0 else 0xFFFFFFFF,
+                entry.last_use if entry.last_use >= 0 else 0xFFFFFFFF,
             )
         )
     return bytes(blob)
@@ -247,13 +292,27 @@ def _metadata_bytes(graph: Graph) -> bytes:
     return json.dumps(metadata, sort_keys=True).encode("utf-8")
 
 
-def _debug_json(graph: Graph) -> dict:
+def _debug_json(graph: Graph, memory_plan: MemoryPlan) -> dict:
     return {
         "model_name": graph.model_name,
         "inputs": graph.inputs,
         "outputs": graph.outputs,
+        "memory": {
+            "naive_activation_bytes": memory_plan.naive_activation_bytes,
+            "planned_activation_bytes": memory_plan.planned_activation_bytes,
+            "memory_reduction_ratio": memory_plan.memory_reduction_ratio,
+            "alloc_input": memory_plan.alloc_input,
+            "alloc_output": memory_plan.alloc_output,
+        },
         "tensors": [
-            {"id": t.id, "name": t.name, "shape": t.shape, "role": t.role, "size_bytes": t.size_bytes}
+            {
+                "id": t.id,
+                "name": t.name,
+                "shape": t.shape,
+                "role": t.role,
+                "size_bytes": t.size_bytes,
+                "memory": memory_plan.entries[t.id].__dict__,
+            }
             for t in graph.tensors
         ],
         "nodes": [
@@ -270,6 +329,20 @@ def _int_list(value, length: int, default: int) -> list[int]:
 
 def _align(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
+
+
+def _memory_class_code(memory_class: str) -> int:
+    if memory_class == "INPUT":
+        return 1
+    if memory_class == "OUTPUT":
+        return 2
+    if memory_class == "WEIGHT":
+        return 3
+    if memory_class == "ACTIVATION_ARENA":
+        return 4
+    if memory_class == "EXTERNAL":
+        return 5
+    raise ValueError(f"unknown memory class: {memory_class}")
 
 
 def _stable_profile_hash(profile: dict) -> int:

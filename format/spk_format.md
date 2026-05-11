@@ -126,3 +126,51 @@ scratch_bytes
 ### Attribute Record
 
 The C definition is `Spkv2AttrRecord`. M1 uses a single fixed attribute record for the supported reference kernels. This is intentionally simple and will be split into op-specific compact attributes after the SPK format stabilizes.
+
+## M2 Memory Plan
+
+M2 activates the Memory Plan section and header arena size fields.
+
+Compiler writes:
+
+```text
+header.activation_arena_bytes
+Memory Plan Section
+TensorRecord.data_offset for non-weight tensors
+memory_plan.csv optional sidecar
+debug JSON memory summary
+```
+
+For M2, `TensorRecord.data_offset` has two meanings:
+
+```text
+weight tensor:
+    offset into Weight section
+
+non-weight tensor:
+    offset into activation arena
+```
+
+Runtime `prepare` uses `header.activation_arena_bytes` to validate the provided arena size. Then it binds each non-weight tensor as:
+
+```text
+tensor.data = arena_base + tensor.data_offset
+```
+
+If a tensor is marked `SPKV2_MEMORY_EXTERNAL`, Runtime leaves its data pointer unset until the user calls an external bind API.
+
+The C definition for Memory Plan entries is `Spkv2MemoryPlanRecord`.
+
+M2 memory plan records include:
+
+```text
+tensor_id
+memory_class
+alignment
+offset
+size
+first_use
+last_use
+```
+
+The Memory Plan section is primarily for verification, debugging, and paper experiments. Runtime uses Tensor Table offsets for the fast path.

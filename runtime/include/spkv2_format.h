@@ -26,6 +26,8 @@ typedef enum {
     SPKV2_SECTION_CHECKSUM = 12
 } Spkv2SectionKind;
 
+#pragma pack(push, 1)
+
 typedef struct {
     uint32_t magic;
     uint16_t version_major;
@@ -84,8 +86,6 @@ typedef enum {
     SPKV2_OP_SOFTMAX = 7
 } Spkv2OpType;
 
-#pragma pack(push, 1)
-
 typedef struct {
     uint32_t id;
     uint16_t dtype;
@@ -125,6 +125,17 @@ typedef struct {
     int32_t trans_b;
     float alpha;
 } Spkv2AttrRecord;
+
+typedef struct {
+    uint32_t tensor_id;
+    uint16_t memory_class;
+    uint16_t alignment;
+    uint32_t flags;
+    uint64_t offset;
+    uint64_t size;
+    uint32_t first_use;
+    uint32_t last_use;
+} Spkv2MemoryPlanRecord;
 
 #pragma pack(pop)
 

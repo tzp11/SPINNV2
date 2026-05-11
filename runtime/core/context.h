@@ -22,6 +22,8 @@ typedef struct Spkv2Context {
 
     const Spkv2TensorRecord *tensor_records;
     const Spkv2NodeRecord *node_records;
+    const Spkv2MemoryPlanRecord *memory_plan_records;
+    size_t memory_plan_count;
     const uint8_t *attrs;
     size_t attrs_size;
     const uint8_t *weights;

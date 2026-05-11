@@ -93,6 +93,7 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     const Spkv2SectionEntry *node_sec = find_section(ctx, SPKV2_SECTION_NODE_TABLE);
     const Spkv2SectionEntry *attr_sec = find_section(ctx, SPKV2_SECTION_ATTRIBUTES);
     const Spkv2SectionEntry *weight_sec = find_section(ctx, SPKV2_SECTION_WEIGHTS);
+    const Spkv2SectionEntry *memory_plan_sec = find_section(ctx, SPKV2_SECTION_MEMORY_PLAN);
     if (!tensor_sec || !node_sec || !attr_sec || !weight_sec) {
         free(ctx);
         return -4;
@@ -108,6 +109,10 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
 
     ctx->tensor_records = (const Spkv2TensorRecord *)(ctx->model_data + tensor_sec->offset);
     ctx->node_records = (const Spkv2NodeRecord *)(ctx->model_data + node_sec->offset);
+    if (memory_plan_sec && memory_plan_sec->size >= ctx->header.num_tensors * sizeof(Spkv2MemoryPlanRecord)) {
+        ctx->memory_plan_records = (const Spkv2MemoryPlanRecord *)(ctx->model_data + memory_plan_sec->offset);
+        ctx->memory_plan_count = (size_t)(memory_plan_sec->size / sizeof(Spkv2MemoryPlanRecord));
+    }
     ctx->attrs = ctx->model_data + attr_sec->offset;
     ctx->attrs_size = (size_t)attr_sec->size;
     ctx->weights = ctx->model_data + weight_sec->offset;
@@ -133,4 +138,3 @@ void spkv2_free(Spkv2Context *ctx) {
     free(ctx->owned_model);
     free(ctx);
 }
-
