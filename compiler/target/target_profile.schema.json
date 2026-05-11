@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SPINNV2 Target Profile",
+  "type": "object",
+  "required": [
+    "name",
+    "word_size",
+    "endianness",
+    "alignment",
+    "memory",
+    "features",
+    "layouts",
+    "backends",
+    "ops"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "word_size": {
+      "type": "integer",
+      "enum": [32, 64]
+    },
+    "endianness": {
+      "type": "string",
+      "enum": ["little", "big"]
+    },
+    "alignment": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "memory": {
+      "type": "object",
+      "required": [
+        "activation_arena_max",
+        "scratch_arena_max",
+        "allow_runtime_malloc"
+      ],
+      "properties": {
+        "activation_arena_max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scratch_arena_max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allow_runtime_malloc": {
+          "type": "boolean"
+        }
+      }
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "layouts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "backends": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ops": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
+

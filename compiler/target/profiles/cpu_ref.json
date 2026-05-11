@@ -1,0 +1,44 @@
+{
+  "name": "cpu_ref",
+  "word_size": 64,
+  "endianness": "little",
+  "alignment": 16,
+  "memory": {
+    "activation_arena_max": 67108864,
+    "scratch_arena_max": 8388608,
+    "allow_runtime_malloc": false
+  },
+  "features": [
+    "fp32"
+  ],
+  "layouts": [
+    "NCHW"
+  ],
+  "backends": [
+    "ref"
+  ],
+  "ops": {
+    "Add": [
+      "ref"
+    ],
+    "Conv": [
+      "ref"
+    ],
+    "Flatten": [
+      "ref"
+    ],
+    "Gemm": [
+      "ref"
+    ],
+    "MaxPool": [
+      "ref"
+    ],
+    "Relu": [
+      "ref"
+    ],
+    "Softmax": [
+      "ref"
+    ]
+  }
+}
+
