@@ -671,6 +671,8 @@ run
   -> output remains in output tensor memory
 ```
 
+M1 实现说明：M1 Runtime 已实现二进制 SPK loader、顺序 executor 和 fp32 reference kernels。由于静态 memory plan 属于 M2，M1 的 `prepare` 阶段使用顺序 arena 分配所有非 weight tensor；M2 会替换为 compiler 写入的 Memory Plan Section。
+
 ### 10.3 Runtime 不应该做的事
 
 Runtime 不应该：

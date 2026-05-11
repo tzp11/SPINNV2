@@ -54,9 +54,82 @@ typedef struct {
     uint32_t reserved;
 } Spkv2SectionEntry;
 
+typedef enum {
+    SPKV2_DTYPE_FP32 = 1
+} Spkv2DType;
+
+typedef enum {
+    SPKV2_ROLE_INPUT = 1,
+    SPKV2_ROLE_OUTPUT = 2,
+    SPKV2_ROLE_WEIGHT = 3,
+    SPKV2_ROLE_ACTIVATION = 4,
+    SPKV2_ROLE_CONSTANT = 5
+} Spkv2TensorRole;
+
+typedef enum {
+    SPKV2_MEMORY_INPUT = 1,
+    SPKV2_MEMORY_OUTPUT = 2,
+    SPKV2_MEMORY_WEIGHT = 3,
+    SPKV2_MEMORY_ACTIVATION_ARENA = 4,
+    SPKV2_MEMORY_EXTERNAL = 5
+} Spkv2MemoryClass;
+
+typedef enum {
+    SPKV2_OP_ADD = 1,
+    SPKV2_OP_CONV = 2,
+    SPKV2_OP_FLATTEN = 3,
+    SPKV2_OP_GEMM = 4,
+    SPKV2_OP_MAXPOOL = 5,
+    SPKV2_OP_RELU = 6,
+    SPKV2_OP_SOFTMAX = 7
+} Spkv2OpType;
+
+#pragma pack(push, 1)
+
+typedef struct {
+    uint32_t id;
+    uint16_t dtype;
+    uint16_t role;
+    uint16_t rank;
+    uint16_t memory_class;
+    uint32_t shape[8];
+    uint64_t size_bytes;
+    uint64_t data_offset;
+    uint32_t name_offset;
+    uint32_t reserved;
+} Spkv2TensorRecord;
+
+typedef struct {
+    uint32_t id;
+    uint16_t op_type;
+    uint16_t flags;
+    uint16_t input_count;
+    uint16_t output_count;
+    uint32_t inputs[8];
+    uint32_t outputs[4];
+    uint32_t attr_offset;
+    uint32_t attr_size;
+    uint32_t kernel_spec_id;
+    uint32_t scratch_bytes;
+} Spkv2NodeRecord;
+
+typedef struct {
+    uint32_t op_type;
+    int32_t axis;
+    int32_t group;
+    int32_t pads[4];
+    int32_t strides[2];
+    int32_t kernel_shape[2];
+    int32_t dilations[2];
+    int32_t trans_a;
+    int32_t trans_b;
+    float alpha;
+} Spkv2AttrRecord;
+
+#pragma pack(pop)
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* SPKV2_FORMAT_H */
-

@@ -145,6 +145,8 @@ ONNX -> SIR -> SPK -> Runtime -> Output
 
 只支持 fp32 和 reference kernel。
 
+M1 的 Runtime 可以采用顺序 arena 分配所有非 weight tensor。真正的生命周期复用和 Memory Plan Section 在 M2 完成。
+
 ### 6.2 算子范围
 
 必须支持：

@@ -64,3 +64,65 @@ Runtime loader must validate:
 
 M0 defines the format constants and documentation only. Full binary serialization starts in M1.
 
+## M1 Binary Tables
+
+M1 implements a compact binary subset:
+
+```text
+Header
+Section Directory
+Metadata JSON
+Target Profile JSON
+Tensor Table
+Node Table
+Attribute Table
+Weight Blob
+String Table
+```
+
+The runtime parses Tensor Table and Node Table directly. Debug JSON remains compiler-side output and is not required by the C runtime.
+
+### Tensor Record
+
+The C definition is `Spkv2TensorRecord` in `runtime/include/spkv2_format.h`.
+
+M1 tensor records include:
+
+```text
+id
+dtype
+role
+rank
+memory_class
+shape[8]
+size_bytes
+data_offset
+name_offset
+```
+
+For M1, `data_offset` is only used for weight tensors and points into the Weight section.
+
+### Node Record
+
+The C definition is `Spkv2NodeRecord`.
+
+M1 node records include:
+
+```text
+id
+op_type
+input_count
+output_count
+inputs[8]
+outputs[4]
+attr_offset
+attr_size
+kernel_spec_id
+scratch_bytes
+```
+
+`kernel_spec_id` and `scratch_bytes` are reserved in M1 and become active in M2-M4.
+
+### Attribute Record
+
+The C definition is `Spkv2AttrRecord`. M1 uses a single fixed attribute record for the supported reference kernels. This is intentionally simple and will be split into op-specific compact attributes after the SPK format stabilizes.

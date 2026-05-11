@@ -8,21 +8,22 @@ The project follows an ahead-of-time deployment route:
 ONNX -> SIR -> SPK -> lightweight Runtime / generated C
 ```
 
-Current status: M0 engineering skeleton.
+Current status: M1 minimal ONNX -> SPK -> Runtime path.
 
 ## M0 Smoke Checks
 
 ```bash
 python -m spinnv2.compiler --help
 python -m spinnv2.compiler --print-target cpu_ref
-python -m unittest discover -s tests/compiler -p 'test*.py' -v
+pytest tests/compiler
+pytest tests/e2e
 cmake -S runtime -B build/runtime
 cmake --build build/runtime
 ctest --test-dir build/runtime
 ```
 
-If `pytest` is installed, the compiler tests are also compatible with:
+If `pytest` is unavailable, the compiler unit tests can still run with:
 
 ```bash
-pytest tests/compiler
+python -m unittest discover -s tests/compiler -p 'test*.py' -v
 ```
