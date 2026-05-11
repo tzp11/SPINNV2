@@ -384,7 +384,7 @@ static int execute_with_spec(Spkv2Context *ctx, const Spkv2NodeRecord *node, con
     NodeKernelFn fn = find_kernel(node->op_type, spec);
     if (!fn) return -99;
     if (spec->scratch_bytes > ctx->scratch_size) return -14;
-    void *scratch = spec->scratch_bytes > 0 ? ctx->owned_scratch + spec->scratch_offset : NULL;
+    void *scratch = spec->scratch_bytes > 0 ? ctx->scratch + spec->scratch_offset : NULL;
     if (spec->scratch_bytes > 0 && spec->scratch_offset > ctx->scratch_size - spec->scratch_bytes) return -14;
     return fn(ctx, node, scratch);
 }

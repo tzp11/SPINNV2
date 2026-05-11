@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void *spkv2_platform_malloc(size_t size);
+void *spkv2_platform_calloc(size_t count, size_t size);
 void spkv2_platform_free(void *ptr);
 
 #ifdef __cplusplus
@@ -15,4 +16,3 @@ void spkv2_platform_free(void *ptr);
 #endif
 
 #endif /* SPKV2_PLATFORM_H */
-

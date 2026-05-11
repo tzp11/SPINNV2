@@ -1,4 +1,5 @@
 #include "context.h"
+#include "spkv2_platform.h"
 #include "spkv2_runtime.h"
 
 #include <stdio.h>
@@ -20,6 +21,15 @@ static int section_bounds_ok(size_t model_size, const Spkv2SectionEntry *section
     return 1;
 }
 
+static uint32_t fnv1a32(const uint8_t *data, size_t size) {
+    uint32_t value = 2166136261u;
+    for (size_t i = 0; i < size; i++) {
+        value ^= data[i];
+        value *= 16777619u;
+    }
+    return value;
+}
+
 int spkv2_load_file(const char *path, Spkv2Context **out_ctx) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
@@ -33,13 +43,13 @@ int spkv2_load_file(const char *path, Spkv2Context **out_ctx) {
         return -1;
     }
     rewind(fp);
-    uint8_t *data = (uint8_t *)malloc((size_t)size);
+    uint8_t *data = (uint8_t *)spkv2_platform_malloc((size_t)size);
     if (!data) {
         fclose(fp);
         return -1;
     }
     if (fread(data, 1, (size_t)size, fp) != (size_t)size) {
-        free(data);
+        spkv2_platform_free(data);
         fclose(fp);
         return -1;
     }
@@ -47,7 +57,7 @@ int spkv2_load_file(const char *path, Spkv2Context **out_ctx) {
 
     int rc = spkv2_load_memory(data, (size_t)size, out_ctx);
     if (rc != 0) {
-        free(data);
+        spkv2_platform_free(data);
         return rc;
     }
     (*out_ctx)->owned_model = data;
@@ -58,23 +68,23 @@ int spkv2_load_file(const char *path, Spkv2Context **out_ctx) {
 int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     if (!data || !out_ctx || size < sizeof(Spkv2Header)) return -1;
 
-    Spkv2Context *ctx = (Spkv2Context *)calloc(1, sizeof(Spkv2Context));
+    Spkv2Context *ctx = (Spkv2Context *)spkv2_platform_calloc(1, sizeof(Spkv2Context));
     if (!ctx) return -1;
 
     memcpy(&ctx->header, data, sizeof(Spkv2Header));
     if (ctx->header.magic != SPKV2_MAGIC) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -2;
     }
     if (ctx->header.version_major != SPKV2_VERSION_MAJOR) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -2;
     }
 
     size_t directory_offset = ctx->header.header_size;
     size_t directory_size = (size_t)ctx->header.section_count * sizeof(Spkv2SectionEntry);
     if (directory_offset > size || directory_size > size - directory_offset) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -3;
     }
 
@@ -84,7 +94,7 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
 
     for (uint32_t i = 0; i < ctx->header.section_count; i++) {
         if (!section_bounds_ok(size, &ctx->sections[i])) {
-            free(ctx);
+            spkv2_platform_free(ctx);
             return -3;
         }
     }
@@ -95,17 +105,31 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     const Spkv2SectionEntry *weight_sec = find_section(ctx, SPKV2_SECTION_WEIGHTS);
     const Spkv2SectionEntry *memory_plan_sec = find_section(ctx, SPKV2_SECTION_MEMORY_PLAN);
     const Spkv2SectionEntry *kernel_spec_sec = find_section(ctx, SPKV2_SECTION_KERNEL_SPEC);
+    const Spkv2SectionEntry *checksum_sec = find_section(ctx, SPKV2_SECTION_CHECKSUM);
     if (!tensor_sec || !node_sec || !attr_sec || !weight_sec) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -4;
     }
     if (tensor_sec->size < ctx->header.num_tensors * sizeof(Spkv2TensorRecord)) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -4;
     }
     if (node_sec->size < ctx->header.num_nodes * sizeof(Spkv2NodeRecord)) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -4;
+    }
+    if (ctx->header.checksum_type == 1) {
+        if (!checksum_sec || checksum_sec->size < sizeof(uint32_t)) {
+            spkv2_platform_free(ctx);
+            return -5;
+        }
+        uint32_t expected = 0;
+        memcpy(&expected, ctx->model_data + checksum_sec->offset, sizeof(expected));
+        uint32_t actual = fnv1a32(ctx->model_data, (size_t)checksum_sec->offset);
+        if (actual != expected) {
+            spkv2_platform_free(ctx);
+            return -6;
+        }
     }
 
     ctx->tensor_records = (const Spkv2TensorRecord *)(ctx->model_data + tensor_sec->offset);
@@ -122,9 +146,9 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     ctx->attrs_size = (size_t)attr_sec->size;
     ctx->weights = ctx->model_data + weight_sec->offset;
     ctx->weights_size = (size_t)weight_sec->size;
-    ctx->tensors = (Spkv2TensorState *)calloc(ctx->header.num_tensors, sizeof(Spkv2TensorState));
+    ctx->tensors = (Spkv2TensorState *)spkv2_platform_calloc(ctx->header.num_tensors, sizeof(Spkv2TensorState));
     if (!ctx->tensors) {
-        free(ctx);
+        spkv2_platform_free(ctx);
         return -1;
     }
 
@@ -138,9 +162,9 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
 
 void spkv2_free(Spkv2Context *ctx) {
     if (!ctx) return;
-    free(ctx->owned_scratch);
-    free(ctx->owned_arena);
-    free(ctx->tensors);
-    free(ctx->owned_model);
-    free(ctx);
+    spkv2_platform_free(ctx->owned_scratch);
+    spkv2_platform_free(ctx->owned_arena);
+    spkv2_platform_free(ctx->tensors);
+    spkv2_platform_free(ctx->owned_model);
+    spkv2_platform_free(ctx);
 }

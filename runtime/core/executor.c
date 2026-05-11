@@ -1,7 +1,7 @@
 #include "context.h"
+#include "spkv2_platform.h"
 #include "spkv2_runtime.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 static uint64_t align16(uint64_t value) {
@@ -9,6 +9,15 @@ static uint64_t align16(uint64_t value) {
 }
 
 int spkv2_prepare(Spkv2Context *ctx, void *arena, size_t arena_size) {
+    return spkv2_prepare_with_scratch(ctx, arena, arena_size, NULL, 0);
+}
+
+int spkv2_prepare_with_scratch(
+    Spkv2Context *ctx,
+    void *arena,
+    size_t arena_size,
+    void *scratch,
+    size_t scratch_size) {
     if (!ctx) return -1;
 
     uint64_t required = ctx->header.activation_arena_bytes;
@@ -19,16 +28,25 @@ int spkv2_prepare(Spkv2Context *ctx, void *arena, size_t arena_size) {
         ctx->owned_arena = NULL;
         ctx->arena_size = arena_size;
     } else {
-        arena = calloc(1, (size_t)required);
+        arena = spkv2_platform_calloc(1, (size_t)required);
         if (!arena && required > 0) return -1;
         ctx->owned_arena = (uint8_t *)arena;
         ctx->arena_size = (size_t)required;
     }
 
     if (scratch_required > 0) {
-        ctx->owned_scratch = (uint8_t *)calloc(1, (size_t)scratch_required);
-        if (!ctx->owned_scratch) return -1;
-        ctx->scratch_size = (size_t)scratch_required;
+        if (scratch) {
+            if (scratch_size < scratch_required) return -2;
+            ctx->owned_scratch = NULL;
+            ctx->scratch = (uint8_t *)scratch;
+            ctx->scratch_size = scratch_size;
+        } else {
+            scratch = spkv2_platform_calloc(1, (size_t)scratch_required);
+            if (!scratch) return -1;
+            ctx->owned_scratch = (uint8_t *)scratch;
+            ctx->scratch = (uint8_t *)scratch;
+            ctx->scratch_size = (size_t)scratch_required;
+        }
     }
 
     for (uint32_t i = 0; i < ctx->header.num_tensors; i++) {

@@ -10,10 +10,11 @@ ONNX -> SIR -> SPK -> lightweight Runtime / generated C
 
 ## Current Status
 
-SPINNV2 is currently a working M4 prototype: the M0 project skeleton, M1
+SPINNV2 is currently a working M5 prototype: the M0 project skeleton, M1
 ONNX-to-runtime path, M2 static activation memory planning, M3 graph
-optimization pipeline, and M4 KernelSpec/backend path are in place and covered
-by smoke, unit, and tiny end-to-end tests.
+optimization pipeline, M4 KernelSpec/backend path, and M5 static C deployment
+path are in place and covered by smoke, unit, tiny end-to-end, and codegen
+tests.
 
 Completed and validated:
 
@@ -47,15 +48,24 @@ Completed and validated:
   exercises M4 memory-budget checks.
 - `benchmarks/compare_kernels.py` compares reference and optimized target
   profiles, with optional runtime latency and output error collection.
+- `python -m spinnv2.compiler codegen` turns an SPK package into generated
+  `model.c`, `model.h`, `main_test.c`, and `CMakeLists.txt` files.
+- Generated C embeds the SPK package as `static const` data, uses static
+  activation and scratch arenas, verifies a generated checksum, and runs through
+  external input/output bind APIs without loading a model file.
+- SPK packages include a checksum section, and the runtime rejects corrupted
+  packages when checksum validation is enabled.
+- Runtime allocation now goes through `spkv2_platform_*`, with a default libc
+  platform implementation that can be replaced for bare-metal builds.
 
 Not started or not yet complete:
 
-- SIMD kernels, packed-weight transforms, code generation, full benchmark
-  suites, and paper experiment automation.
+- SIMD kernels, packed-weight transforms, full benchmark suites, and paper
+  experiment automation.
 - Broad model coverage beyond the current fixed-shape fp32 toy/tiny CNN and
   Conv+BN+Relu validation paths.
-- Dynamic shapes, quantization, checksum enforcement, and production-level SPK
-  compatibility guarantees.
+- Dynamic shapes, quantization kernels, and production-level SPK compatibility
+  guarantees.
 
 ## Smoke Checks
 
@@ -63,8 +73,10 @@ Not started or not yet complete:
 python -m spinnv2.compiler --help
 python -m spinnv2.compiler --print-target cpu_ref
 python -m spinnv2.compiler compile --help
+python -m spinnv2.compiler codegen --help
 pytest tests/compiler
 pytest tests/e2e
+pytest tests/codegen
 cmake -S runtime -B build/runtime
 cmake --build build/runtime
 ctest --test-dir build/runtime

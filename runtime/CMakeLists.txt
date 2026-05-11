@@ -5,11 +5,17 @@ project(spinnv2_runtime C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(SPKV2_PLATFORM_SOURCE
+    platform/platform.c
+    CACHE STRING "Platform abstraction source file for SPINNV2 runtime"
+)
+
 add_library(spkv2_runtime STATIC
     core/version.c
     core/loader.c
     core/executor.c
     kernels/reference/kernels.c
+    ${SPKV2_PLATFORM_SOURCE}
 )
 
 target_include_directories(spkv2_runtime

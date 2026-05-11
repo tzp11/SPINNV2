@@ -35,6 +35,7 @@ typedef struct Spkv2Context {
     uint8_t *owned_arena;
     size_t arena_size;
     uint8_t *owned_scratch;
+    uint8_t *scratch;
     size_t scratch_size;
 } Spkv2Context;
 

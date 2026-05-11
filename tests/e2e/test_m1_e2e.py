@@ -56,6 +56,13 @@ def test_m1_tiny_cnn_e2e(tmp_path: Path):
 
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
 
+    bad_spk_path = tmp_path / "tiny_cnn_bad_checksum.spk"
+    bad_spk = bytearray(spk_path.read_bytes())
+    bad_spk[100] ^= 0x1
+    bad_spk_path.write_bytes(bad_spk)
+    bad_run = subprocess.run([str(runner), str(bad_spk_path), str(input_path), str(output_path)])
+    assert bad_run.returncode != 0
+
 
 def test_m3_conv_bn_relu_fusion_e2e(tmp_path: Path):
     model_path = tmp_path / "conv_bn_relu.onnx"

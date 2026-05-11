@@ -25,6 +25,7 @@ SECTION_WEIGHTS = 6
 SECTION_MEMORY_PLAN = 7
 SECTION_KERNEL_SPEC = 8
 SECTION_STRING_TABLE = 10
+SECTION_CHECKSUM = 12
 
 DTYPE_CODES = {types.DTYPE_FP32: 1}
 LAYOUT_CODES = {"NCHW": 1}
@@ -100,6 +101,7 @@ def write_spk(
     sections.append((SECTION_MEMORY_PLAN, _memory_plan_bytes(graph, memory_plan), 4))
     sections.append((SECTION_KERNEL_SPEC, _kernel_spec_bytes(kernel_plan.specs), 4))
     sections.append((SECTION_STRING_TABLE, strings.blob, 1))
+    sections.append((SECTION_CHECKSUM, b"\x00\x00\x00\x00", 4))
 
     section_count = len(sections)
     header_size = HEADER_STRUCT.size
@@ -107,12 +109,15 @@ def write_spk(
     offset = header_size + directory_size
     directory = bytearray()
     payload = bytearray()
+    checksum_offset = 0
 
     for kind, data, alignment in sections:
         aligned_offset = _align(offset, alignment)
         if aligned_offset > offset:
             payload.extend(b"\x00" * (aligned_offset - offset))
             offset = aligned_offset
+        if kind == SECTION_CHECKSUM:
+            checksum_offset = offset
         directory.extend(SECTION_STRUCT.pack(kind, 0, offset, len(data), alignment, 0))
         payload.extend(data)
         offset += len(data)
@@ -133,11 +138,14 @@ def write_spk(
         memory_plan.planned_activation_bytes,
         kernel_plan.scratch_arena_bytes,
         _stable_profile_hash(target_profile),
-        0,
+        1,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(header + bytes(directory) + bytes(payload))
+    package = bytearray(header + bytes(directory) + bytes(payload))
+    checksum = _fnv1a32(package[:checksum_offset])
+    package[checksum_offset : checksum_offset + 4] = struct.pack("<I", checksum)
+    out_path.write_bytes(package)
     out_path.with_suffix(out_path.suffix + ".json").write_text(
         json.dumps(_debug_json(graph, memory_plan), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -389,6 +397,10 @@ def _memory_class_code(memory_class: str) -> int:
 
 def _stable_profile_hash(profile: dict) -> int:
     data = json.dumps(profile, sort_keys=True).encode("utf-8")
+    return _fnv1a32(data)
+
+
+def _fnv1a32(data: bytes | bytearray) -> int:
     value = 2166136261
     for byte in data:
         value ^= byte

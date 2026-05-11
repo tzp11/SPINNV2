@@ -462,6 +462,40 @@ M4 已实现 target profile -> KernelSpec -> runtime registry 的最小闭环。
 | run 阶段 malloc | 0 |
 | checksum corruption test | 必须失败 |
 
+### 10.4 M5 当前实现状态
+
+M5 已实现 SPK -> static C deployment 的最小闭环。
+
+当前落地产物：
+
+1. `python -m spinnv2.compiler codegen model.spk --out-dir ... --name ...`
+   生成 `model.c`、`model.h`、`main_test.c` 和 `CMakeLists.txt`。
+2. generated `model.c` 将完整 SPK package 嵌入为 `static const unsigned char[]`；
+   权重随 SPK Weight Section 进入 `.rodata`。
+3. generated `model.c` 使用静态 activation arena 和静态 scratch arena，并调用
+   `spkv2_prepare_with_scratch`。
+4. generated `model_run` 使用 `spkv2_bind_input` 和 `spkv2_bind_output`，验证
+   external IO bind 的无模型文件加载路径。
+5. SPK writer 写入 Checksum Section，Header `checksum_type=1`；runtime loader
+   校验 checksum，损坏 SPK 会加载失败。
+6. generated wrapper 也对 embedded SPK 做 checksum 校验，`model_init` 在校验失败
+   时返回错误。
+7. Runtime allocation 经过 `spkv2_platform_malloc/calloc/free`；默认
+   `runtime/platform/platform.c` 是 libc 实现，CMake `SPKV2_PLATFORM_SOURCE`
+   可替换为 bare-metal stub。
+8. `tests/codegen/test_c_codegen.py` 覆盖 generated model 编译、运行、输出数值和
+   checksum 损坏拒绝；`tests/e2e/test_m1_e2e.py` 覆盖普通 SPK runtime checksum
+   损坏拒绝。
+
+边界说明：
+
+1. 当前 codegen 仍复用 runtime loader/executor/kernel registry，不生成每个 op 的
+   fully inlined C 函数。
+2. Persistent context/tensor state 仍由 runtime load 阶段分配；论文实验中的
+   no-malloc 重点是 model file-free、static activation/scratch 和 run 阶段无动态
+   allocation。
+3. Quantization/INT8 仍为格式和字段预留，fp32 路径保持不受影响。
+
 ## 11. M6：论文实验与冻结
 
 ### 11.1 目标

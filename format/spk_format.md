@@ -219,3 +219,30 @@ through its compiled kernel registry using `op_type + backend + kernel_kind`. If
 the selected kernel is not present, Runtime follows `fallback_kernel_spec_id`.
 Current backend codes are `ref=1` and `cpu=2`; current kernel kind codes are
 `reference=1`, `direct=2`, and `im2col_gemm=3`.
+
+## M5 Checksum And Codegen
+
+M5 enables `header.checksum_type = 1`, meaning FNV-1a 32-bit. The Checksum
+section stores the checksum of all package bytes before the Checksum section.
+The Checksum section is written last, so runtime verification covers the header,
+directory, and all model payload sections that precede it.
+
+Runtime rejects packages with checksum type `1` when the Checksum section is
+missing, truncated, or mismatched.
+
+M5 codegen embeds the complete SPK package as a `static const unsigned char[]`
+inside generated `model.c`. Generated code also stores a checksum of that
+embedded blob and verifies it before calling `spkv2_load_memory`.
+
+Generated deployment files are:
+
+```text
+model.h
+model.c
+main_test.c
+CMakeLists.txt
+```
+
+Generated `model.c` owns static activation and scratch arenas, then calls
+`spkv2_prepare_with_scratch` and binds caller-provided input/output buffers via
+`spkv2_bind_input` and `spkv2_bind_output`.

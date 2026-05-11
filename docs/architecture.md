@@ -1342,21 +1342,31 @@ M4 后续增强：
 
 ### 17.6 M5：Codegen 与星载部署特性
 
-实现：
+当前实现：
 
-1. SPK -> C。
-2. static arena。
-3. static const weights。
-4. checksum。
-5. platform abstraction。
-6. external input/output bind。
-7. int8 quant 字段预留或最小 int8 kernel 预研。
+1. `compiler/codegen/c_codegen.py` 将 SPK 生成 `model.c`、`model.h`、
+   `main_test.c` 和 `CMakeLists.txt`。
+2. generated `model.c` 把 SPK bytes 编译为 `static const` 数据；权重仍位于
+   embedded SPK 的 Weight Section，因此进入 `.rodata`。
+3. generated `model.c` 使用静态 activation arena 和静态 scratch arena，并通过
+   `spkv2_prepare_with_scratch` 避免 prepare 阶段为 scratch 动态分配。
+4. generated `model_run` 通过 external input/output bind API 运行，避免输入输出
+   额外拷贝。
+5. SPK writer 写入 Checksum Section；runtime loader 在 `checksum_type == 1` 时
+   校验损坏 SPK 并失败。
+6. generated wrapper 也保存 embedded SPK 的 checksum，并在 `model_init` 前校验。
+7. Runtime persistent allocation 走 `spkv2_platform_malloc/calloc/free`；默认
+   `runtime/platform/platform.c` 使用 libc，CMake 可替换 `SPKV2_PLATFORM_SOURCE`
+   接入 bare-metal stub。
+8. Quantization section ID 与 dtype/KernelSpec 字段继续保留，fp32 路径不受影响。
 
-验收：
+当前 M5 验证状态：
 
 ```text
-generated model.c 独立编译运行
-无文件加载路径可执行
+tests/codegen/test_c_codegen.py 覆盖 generated C 编译、运行、checksum 损坏拒绝。
+tests/e2e/test_m1_e2e.py 覆盖 SPK runtime checksum 损坏拒绝。
+pytest tests/compiler tests/e2e tests/codegen 通过。
+ctest --test-dir build/runtime 通过。
 ```
 
 ## 18. 论文贡献表述建议

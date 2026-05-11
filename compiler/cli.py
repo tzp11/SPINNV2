@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from compiler.codegen.c_codegen import generate_c_from_spk
 from compiler.frontend.onnx_importer import import_onnx
 from compiler.packager.spk_writer import write_spk
 from compiler.passes.manager import DEFAULT_PIPELINE, run_pass_pipeline, write_pass_stats_json
@@ -48,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument("--pass-stats-json", help="Optional M3 pass statistics JSON output path.")
     compile_parser.add_argument("--external-inputs", action="store_true", help="Do not allocate graph inputs in activation arena.")
     compile_parser.add_argument("--external-outputs", action="store_true", help="Do not allocate graph outputs in activation arena.")
+    codegen_parser = subparsers.add_parser("codegen", help="Generate static C deployment files from SPK.")
+    codegen_parser.add_argument("spk", help="Input SPK package path.")
+    codegen_parser.add_argument("--out-dir", required=True, help="Output directory for generated C files.")
+    codegen_parser.add_argument("--name", default="model", help="C symbol/file prefix.")
+    codegen_parser.add_argument("--runtime-dir", default="runtime", help="Path to the SPINNV2 runtime source directory.")
     return parser
 
 
@@ -110,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
             f"planned={memory_plan.planned_activation_bytes}",
             f"reduction={memory_plan.memory_reduction_ratio:.4f}",
         )
+        return 0
+
+    if args.command == "codegen":
+        generate_c_from_spk(args.spk, args.out_dir, name=args.name, runtime_dir=args.runtime_dir)
+        print(f"Wrote generated C deployment to {args.out_dir}")
         return 0
 
     parser.print_help()
