@@ -9,7 +9,7 @@ extern "C" {
 
 #define SPKV2_MAGIC 0x32564B50u /* 'PKV2' little-endian */
 #define SPKV2_VERSION_MAJOR 0u
-#define SPKV2_VERSION_MINOR 1u
+#define SPKV2_VERSION_MINOR 2u
 
 typedef enum {
     SPKV2_SECTION_METADATA = 1,
@@ -83,7 +83,25 @@ typedef enum {
     SPKV2_OP_GEMM = 4,
     SPKV2_OP_MAXPOOL = 5,
     SPKV2_OP_RELU = 6,
-    SPKV2_OP_SOFTMAX = 7
+    SPKV2_OP_SOFTMAX = 7,
+    SPKV2_OP_MUL = 8,
+    SPKV2_OP_SUB = 9,
+    SPKV2_OP_DIV = 10,
+    SPKV2_OP_MOD = 11,
+    SPKV2_OP_SIGMOID = 12,
+    SPKV2_OP_RESHAPE = 13,
+    SPKV2_OP_TRANSPOSE = 14,
+    SPKV2_OP_CONCAT = 15,
+    SPKV2_OP_SPLIT = 16,
+    SPKV2_OP_REDUCEMEAN = 17,
+    SPKV2_OP_REDUCEMAX = 18,
+    SPKV2_OP_MATMUL = 19,
+    SPKV2_OP_RESIZE = 20,
+    SPKV2_OP_TILE = 21,
+    SPKV2_OP_UNSQUEEZE = 22,
+    SPKV2_OP_GATHERELEMENTS = 23,
+    SPKV2_OP_TOPK = 24,
+    SPKV2_OP_CAST = 25
 } Spkv2OpType;
 
 typedef enum {
@@ -139,6 +157,13 @@ typedef struct {
     int32_t trans_a;
     int32_t trans_b;
     float alpha;
+    int32_t extra_count;
+    int32_t keepdims;
+    int32_t extra[8];
+    int32_t largest;
+    int32_t sorted;
+    int32_t cast_to;
+    int32_t reserved;
 } Spkv2AttrRecord;
 
 typedef struct {

@@ -21,24 +21,77 @@
     "Add": [
       "ref"
     ],
+    "Cast": [
+      "ref"
+    ],
+    "Concat": [
+      "ref"
+    ],
     "Conv": [
+      "ref"
+    ],
+    "Div": [
       "ref"
     ],
     "Flatten": [
       "ref"
     ],
+    "GatherElements": [
+      "ref"
+    ],
     "Gemm": [
+      "ref"
+    ],
+    "MatMul": [
       "ref"
     ],
     "MaxPool": [
       "ref"
     ],
+    "Mod": [
+      "ref"
+    ],
+    "Mul": [
+      "ref"
+    ],
+    "ReduceMax": [
+      "ref"
+    ],
+    "ReduceMean": [
+      "ref"
+    ],
     "Relu": [
+      "ref"
+    ],
+    "Reshape": [
+      "ref"
+    ],
+    "Resize": [
+      "ref"
+    ],
+    "Sigmoid": [
       "ref"
     ],
     "Softmax": [
       "ref"
+    ],
+    "Split": [
+      "ref"
+    ],
+    "Sub": [
+      "ref"
+    ],
+    "Tile": [
+      "ref"
+    ],
+    "TopK": [
+      "ref"
+    ],
+    "Transpose": [
+      "ref"
+    ],
+    "Unsqueeze": [
+      "ref"
     ]
   }
 }
-

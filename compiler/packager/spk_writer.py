@@ -14,7 +14,7 @@ from compiler.planner.memory_plan import MemoryPlan, plan_memory, write_memory_p
 
 SPKV2_MAGIC = 0x32564B50
 VERSION_MAJOR = 0
-VERSION_MINOR = 1
+VERSION_MINOR = 2
 
 SECTION_METADATA = 1
 SECTION_TARGET_PROFILE = 2
@@ -55,13 +55,31 @@ OP_CODES = {
     "MaxPool": 5,
     "Relu": 6,
     "Softmax": 7,
+    "Mul": 8,
+    "Sub": 9,
+    "Div": 10,
+    "Mod": 11,
+    "Sigmoid": 12,
+    "Reshape": 13,
+    "Transpose": 14,
+    "Concat": 15,
+    "Split": 16,
+    "ReduceMean": 17,
+    "ReduceMax": 18,
+    "MatMul": 19,
+    "Resize": 20,
+    "Tile": 21,
+    "Unsqueeze": 22,
+    "GatherElements": 23,
+    "TopK": 24,
+    "Cast": 25,
 }
 
 HEADER_STRUCT = struct.Struct("<IHHHHIIIIIIQQQII")
 SECTION_STRUCT = struct.Struct("<IIQQII")
 TENSOR_STRUCT = struct.Struct("<IHHHH8IQQII")
 NODE_STRUCT = struct.Struct("<IHHHH8I4IIIII")
-ATTR_STRUCT = struct.Struct("<Iiii4i2i2i2i2if")
+ATTR_STRUCT = struct.Struct("<Iiii4i2i2i2i2ifii8i4i")
 MEMORY_PLAN_STRUCT = struct.Struct("<IHHIQQII")
 KERNEL_SPEC_STRUCT = struct.Struct("<IIHHHHHHQQII")
 
@@ -211,6 +229,16 @@ def _attr_bytes(node: Node) -> bytes:
     trans_a = int(attrs.get("transA", 0))
     trans_b = int(attrs.get("transB", 0))
     fused_activation = 1 if attrs.get("fused_activation") == "Relu" else 0
+    extra_values: list[int] = []
+    if node.op_type == "Transpose":
+        extra_values = [int(v) for v in attrs.get("perm", [])]
+    elif node.op_type in {"ReduceMean", "ReduceMax"} and "axes" in attrs:
+        extra_values = [int(v) for v in attrs.get("axes", [])]
+    extra = (extra_values + [0] * 8)[:8]
+    keepdims = int(attrs.get("keepdims", 1))
+    largest = int(attrs.get("largest", 1))
+    sorted_attr = int(attrs.get("sorted", 1))
+    cast_to = int(attrs.get("to", 1))
     return ATTR_STRUCT.pack(
         OP_CODES[node.op_type],
         axis,
@@ -229,6 +257,13 @@ def _attr_bytes(node: Node) -> bytes:
         trans_a,
         trans_b,
         alpha,
+        len(extra_values),
+        keepdims,
+        *extra,
+        largest,
+        sorted_attr,
+        cast_to,
+        0,
     )
 
 

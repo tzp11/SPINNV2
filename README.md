@@ -10,17 +10,21 @@ ONNX -> SIR -> SPK -> lightweight Runtime / generated C
 
 ## Current Status
 
-SPINNV2 is currently a working M5 prototype: the M0 project skeleton, M1
+SPINNV2 is currently a working M6 prototype: the M0 project skeleton, M1
 ONNX-to-runtime path, M2 static activation memory planning, M3 graph
 optimization pipeline, M4 KernelSpec/backend path, and M5 static C deployment
-path are in place and covered by smoke, unit, tiny end-to-end, and codegen
+path are in place. M6 large-model validation now covers ResNet101 and YOLOv10n
+compile/runtime smoke tests in addition to unit, tiny end-to-end, and codegen
 tests.
 
 Completed and validated:
 
 - Compiler CLI can import fixed-shape fp32 ONNX models and write SPK packages.
-- Supported runtime ops are `Add`, `Conv`, `Flatten`, `Gemm`, `MaxPool`, `Relu`,
-  and `Softmax` through reference kernels.
+- Supported runtime ops include `Add`, `Cast`, `Concat`, `Conv`, `Div`,
+  `Flatten`, `GatherElements`, `Gemm`, `MatMul`, `MaxPool`, `Mod`, `Mul`,
+  `ReduceMax`, `ReduceMean`, `Relu`, `Reshape`, `Resize`, `Sigmoid`, `Softmax`,
+  `Split`, `Sub`, `Tile`, `TopK`, `Transpose`, and `Unsqueeze` through
+  reference kernels.
 - SPK writer emits tensor/node/attribute/weight tables, debug JSON, and an M2
   Memory Plan section.
 - Memory planner performs lifetime analysis, best-fit activation arena reuse,
@@ -60,10 +64,8 @@ Completed and validated:
 
 Not started or not yet complete:
 
-- SIMD kernels, packed-weight transforms, full benchmark suites, and paper
-  experiment automation.
-- Broad model coverage beyond the current fixed-shape fp32 toy/tiny CNN and
-  Conv+BN+Relu validation paths.
+- SIMD kernels, packed-weight transforms, and full paper figure automation.
+- Broad model coverage beyond fixed-shape fp32 CNN/detection paths.
 - Dynamic shapes, quantization kernels, and production-level SPK compatibility
   guarantees.
 

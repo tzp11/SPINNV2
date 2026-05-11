@@ -356,20 +356,31 @@ Transpose
 
 ### 7.2 第二阶段算子
 
-第二阶段目标是支持轻量检测模型。
+第二阶段目标是支持 ResNet101 和 YOLOv10n 这类固定 shape fp32
+分类/检测模型。当前实现已把以下算子纳入 SIR/SPK/runtime reference
+路径：
 
 ```text
+Cast
 Concat
+Div
+GatherElements
+Mod
+ReduceMax
+ReduceMean
 Resize
-Pad
-Slice
 Sigmoid
-BatchNormalization
-GlobalAveragePool
-LeakyRelu
-Clip
-NMS 可选
+Split
+Sub
+Tile
+TopK
+Unsqueeze
 ```
+
+其中 YOLOv10n 后处理中的整数索引张量在当前 fp32-only SIR 内以 float
+承载整数值，并在 `TopK`、`GatherElements`、`Div`、`Mod` 等 runtime kernel
+中按整数语义解释。后续如果扩展 dtype table，应把这一路径替换为显式 int64
+tensor。
 
 ### 7.3 算子支持策略
 
@@ -1365,6 +1376,49 @@ M4 后续增强：
 ```text
 tests/codegen/test_c_codegen.py 覆盖 generated C 编译、运行、checksum 损坏拒绝。
 tests/e2e/test_m1_e2e.py 覆盖 SPK runtime checksum 损坏拒绝。
+pytest tests/compiler tests/e2e tests/codegen 通过。
+ctest --test-dir build/runtime 通过。
+```
+
+### 17.7 M6：大模型实验与冻结
+
+当前实现：
+
+1. SPK minor version 更新到 `0.2`，Attribute Record 扩展了 `perm`、`axes`、
+   `keepdims`、`TopK` 参数和 cast 参数字段，用于承载 ResNet101/YOLOv10n
+   需要的 shape、reduce、transpose 和后处理算子属性。
+2. Compiler、target profile 和 runtime reference registry 支持：
+   `Add`、`Cast`、`Concat`、`Conv`、`Div`、`Flatten`、`GatherElements`、
+   `Gemm`、`MatMul`、`MaxPool`、`Mod`、`Mul`、`ReduceMax`、`ReduceMean`、
+   `Relu`、`Reshape`、`Resize`、`Sigmoid`、`Softmax`、`Split`、`Sub`、`Tile`、
+   `TopK`、`Transpose`、`Unsqueeze`。
+3. Reference Conv 支持 grouped/depthwise convolution；`cpu_generic` 的
+   im2col Conv 在 group != 1 时返回 missing-kernel，由 runtime fallback 到
+   reference Conv。
+4. `benchmarks/run_m6_models.py` 固化 ResNet101/YOLOv10n 的 op 统计、编译、
+   ORT baseline、runtime 执行和误差指标采集。
+
+当前 M6 验证状态：
+
+```text
+ResNet101:
+  compile 成功，241 nodes。
+  FuseConvRelu: 67。
+  naive activation: 137803680 bytes。
+  planned activation: 14249984 bytes。
+  runtime: 58.91s，maxrss 189244KB。
+  ORT 对齐: top1_equal=true，max_abs_error=0.0546875，mean_abs_error=0.00544044。
+
+YOLOv10n:
+  compile 成功，308 nodes。
+  naive activation: 307286000 bytes。
+  planned activation: 24576000 bytes。
+  runtime: 30.59s，maxrss 35148KB。
+  ORT 对齐: score_max_abs_error=5.46e-08，score_mean_abs_error=1.08e-08。
+  top10 rows: max_abs_error=6.26e-04，mean_abs_error=9.86e-05，class 10/10。
+  top20+ 低置信度行受 TopK 微小数值差影响，候选框/类别顺序会分叉；
+  论文实验应分别报告 score 误差、topN 高置信行误差和全量输出误差。
+
 pytest tests/compiler tests/e2e tests/codegen 通过。
 ctest --test-dir build/runtime 通过。
 ```

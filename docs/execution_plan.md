@@ -500,7 +500,9 @@ M5 已实现 SPK -> static C deployment 的最小闭环。
 
 ### 11.1 目标
 
-把工程结果转成论文可用证据。
+把工程结果转成论文可用证据。M6 不再只停留在 toy/tiny 模型；必须把
+ResNet101 和 YOLOv10n 纳入固定 shape fp32 大模型验证集，确保 compiler、
+SPK、runtime reference kernel、静态内存规划和 ORT 对齐工具能承受真实模型。
 
 ### 11.2 实验矩阵
 
@@ -513,7 +515,31 @@ M5 已实现 SPK -> static C deployment 的最小闭环。
 | target profile | cpu_ref vs memory_limited | deploy success/fail report |
 | codegen | SPK runtime vs generated C | latency / binary size / malloc |
 
-### 11.3 冻结标准
+### 11.3 当前 M6 执行状态
+
+已实现：
+
+1. 扩展 SIR/SPK/runtime reference 算子集合，覆盖 ResNet101 和 YOLOv10n
+   所需的分类、张量搬运、reduce、resize、TopK/Gather 后处理算子。
+2. SPK minor version 更新到 `0.2`，Attribute Record 增加通用 extra 字段，
+   用于保存 `Transpose.perm`、`Reduce*.axes`、`keepdims`、`TopK` 和 `Cast`
+   参数。
+3. `benchmarks/run_m6_models.py` 固化大模型 op 统计、编译、ORT baseline、
+   runtime 运行和误差指标导出。
+
+当前结果：
+
+| 模型 | 编译 | runtime | 内存规划 | ORT 对齐 |
+|---|---|---|---|---|
+| ResNet101 | 成功，241 nodes | 58.91s / 189244KB | 137803680 -> 14249984 bytes | top1 一致，max_abs=0.0546875，mean_abs=0.00544044 |
+| YOLOv10n | 成功，308 nodes | 30.59s / 35148KB | 307286000 -> 24576000 bytes | score max_abs=5.46e-08；top10 max_abs=6.26e-04，class 10/10 |
+
+YOLOv10n 全量 300 行输出中，低置信度候选的 TopK 排序会因 fp32 reference
+累积误差出现候选框/类别分叉；M6 论文实验应同时报告 score 误差、topN 高置信
+行误差、class match count 和全量 max/mean error，避免只用单个全量 max_abs
+掩盖实际行为。
+
+### 11.4 冻结标准
 
 进入论文写作前，必须冻结：
 
@@ -717,7 +743,7 @@ Target profile 未稳定前，不应做复杂 backend fallback。
 |---|---|---|
 | ONNX importer 复杂度过高 | M1 延迟 | 只支持固定模型导出的有限 op |
 | Conv 实现性能差 | M4 指标差 | 先强调内存/确定性，性能只与 reference 对比 |
-| YOLO 子图支持困难 | M6 实验不足 | 使用 ResNet/MobileNet 作为主实验 |
+| YOLO 后处理 TopK 对微小误差敏感 | 全量输出 max_abs 偏大 | 同时报告 score/topN/class match，并保留 ORT 中间输出定位脚本 |
 | int8 来不及 | 低比特内容不足 | 只保留格式预留和相关工作分析 |
 | Codegen 复杂 | M5 延迟 | 只生成单模型静态 C，不支持多模型 |
 | SIMD 不稳定 | 数值风险 | SIMD 作为可选扩展，论文主线不依赖 |

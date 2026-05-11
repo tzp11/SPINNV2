@@ -12,12 +12,30 @@ LAYOUT_NCHW = "NCHW"
 
 SUPPORTED_M1_OPS = {
     "Add",
+    "Cast",
+    "Concat",
     "Conv",
+    "Div",
     "Flatten",
+    "GatherElements",
     "Gemm",
+    "MatMul",
     "MaxPool",
+    "Mod",
+    "Mul",
+    "ReduceMax",
+    "ReduceMean",
     "Relu",
+    "Reshape",
+    "Resize",
+    "Sigmoid",
     "Softmax",
+    "Split",
+    "Sub",
+    "Tile",
+    "TopK",
+    "Transpose",
+    "Unsqueeze",
 }
 
 COMPILER_ONLY_OPS = {

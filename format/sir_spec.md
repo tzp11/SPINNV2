@@ -76,7 +76,41 @@ Reshape
 Transpose
 ```
 
+## M6 Large-Model Op Set
+
+M6 extends the fixed-shape fp32 op set for ResNet101 and YOLOv10n:
+
+```text
+Add
+Cast
+Concat
+Conv
+Div
+Flatten
+GatherElements
+Gemm
+MatMul
+MaxPool
+Mod
+Mul
+ReduceMax
+ReduceMean
+Relu
+Reshape
+Resize
+Sigmoid
+Softmax
+Split
+Sub
+Tile
+TopK
+Transpose
+Unsqueeze
+```
+
+SPINNV2 still treats this as a deliberately bounded deployment op set, not full
+ONNX coverage.
+
 ## Rejection Rule
 
 Unsupported ONNX operators must fail at compile time. Runtime must never interpret unknown ONNX operators.
-

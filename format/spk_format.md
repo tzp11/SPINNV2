@@ -18,7 +18,7 @@ Required header fields:
 | Field | Meaning |
 |---|---|
 | `magic` | `SPKV2_MAGIC` |
-| `version_major/minor` | Format version |
+| `version_major/minor` | Format version. Current binary writer emits `0.2`. |
 | `endianness` | Encoded byte order |
 | `section_count` | Number of section directory entries |
 | `num_tensors` | Tensor count |
@@ -130,6 +130,21 @@ The C definition is `Spkv2AttrRecord`. M1 uses a single fixed attribute record f
 M3 extends the fixed attribute record with `fused_activation`. The current value
 `1` means Conv output applies fused Relu in the reference runtime; `0` means no
 fused activation.
+
+M6 keeps the fixed record shape but extends it for large-model operators:
+
+```text
+extra_count
+keepdims
+extra[8]        # Transpose perm or Reduce axes
+largest
+sorted
+cast_to
+reserved
+```
+
+The extension is used by ResNet101/YOLOv10n operators such as `Transpose`,
+`ReduceMean`, `ReduceMax`, `TopK`, and `Cast`.
 
 ## M2 Memory Plan
 

@@ -22,24 +22,78 @@
     "Add": [
       "ref"
     ],
+    "Cast": [
+      "ref"
+    ],
+    "Concat": [
+      "ref"
+    ],
     "Conv": [
       "im2col_gemm",
       "ref"
     ],
+    "Div": [
+      "ref"
+    ],
     "Flatten": [
+      "ref"
+    ],
+    "GatherElements": [
       "ref"
     ],
     "Gemm": [
       "direct",
       "ref"
     ],
+    "MatMul": [
+      "ref"
+    ],
     "MaxPool": [
+      "ref"
+    ],
+    "Mod": [
+      "ref"
+    ],
+    "Mul": [
+      "ref"
+    ],
+    "ReduceMax": [
+      "ref"
+    ],
+    "ReduceMean": [
       "ref"
     ],
     "Relu": [
       "ref"
     ],
+    "Reshape": [
+      "ref"
+    ],
+    "Resize": [
+      "ref"
+    ],
+    "Sigmoid": [
+      "ref"
+    ],
     "Softmax": [
+      "ref"
+    ],
+    "Split": [
+      "ref"
+    ],
+    "Sub": [
+      "ref"
+    ],
+    "Tile": [
+      "ref"
+    ],
+    "TopK": [
+      "ref"
+    ],
+    "Transpose": [
+      "ref"
+    ],
+    "Unsqueeze": [
       "ref"
     ]
   }
