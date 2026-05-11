@@ -628,6 +628,35 @@ System Tests:
 
 所有阈值必须写进测试配置，不能散落在脚本里。
 
+### 12.5 当前测试验证集执行状态
+
+M6 已将 12.2 中的模型验证集落成可执行生成器和脚本：
+
+```text
+tests/e2e/model_zoo.py
+tests/e2e/run_e2e.py
+```
+
+当前 `tests/e2e/run_e2e.py --all` 已覆盖：
+
+| 层级 | 当前执行模型 | 说明 |
+|---|---|---|
+| Toy | `add`, `gemm_softmax`, `conv_relu`, `conv_bn_relu` | 生成固定 shape ONNX，覆盖基础 executor、Gemm/Softmax、Conv/Relu、Conv+BN+Relu fusion |
+| Small | `mnist`, `lenet` | 生成固定 shape CNN，覆盖最小端到端与稍复杂 CNN |
+| Medium | `resnet18`, `mobilenetv2` | 生成 ResNet-like residual block 与 MobileNet-like depthwise block，用于内存和 depthwise smoke |
+| Detection | `yolo_tiny_prenms` | 生成检测前 NMS 风格子图，覆盖 Sigmoid/Mul/Concat/Transpose |
+
+这些是可复现的固定输入 smoke/e2e 模型，不是 MNIST/ImageNet 真实数据集准确率评估。
+真实 MNIST 100 张和 ImageNet 50-100 张仍属于后续数据集级精度实验，不作为当前
+M6 冻结门槛。
+
+最新执行结果：
+
+```text
+python tests/e2e/run_e2e.py --all --out-dir build/e2e_all 通过。
+build/e2e_all/e2e_report.json 记录每个模型的 SPK 大小、内存规划和 ORT 误差。
+```
+
 ## 13. 指标体系
 
 ### 13.1 正确性指标
@@ -713,6 +742,38 @@ python scripts/check_reproducibility.py
 ```
 
 Release 前必须重新生成论文表格，避免手工数据和脚本结果不一致。
+
+### 14.4 当前集成测试执行状态
+
+快速测试已执行：
+
+```text
+pytest tests/compiler/unit tests/compiler/format
+ctest --test-dir build/runtime -R runtime_unit
+python tests/e2e/run_e2e.py --model toy --out-dir build/e2e_toy
+```
+
+阶段性完整测试已执行：
+
+```text
+python tests/e2e/run_e2e.py --all-small --out-dir build/e2e_all_small
+python benchmarks/run_memory.py --models mnist,lenet,resnet18 --out-dir build/memory_benchmark
+python benchmarks/run_latency.py --models mnist,lenet --out-dir build/latency_benchmark --runs 3
+python tests/codegen/run_codegen_test.py --models mnist,lenet --out-dir build/codegen_validation
+```
+
+Release 前测试已执行：
+
+```text
+python tests/e2e/run_e2e.py --all --out-dir build/e2e_all
+python benchmarks/run_all.py --out-dir build/m6_release_final --tables-dir build/m6_release_tables
+python scripts/export_paper_tables.py build/m6_release_final/m6_report.json --out-dir build/m6_release_tables
+python scripts/check_reproducibility.py build/m6_release_final/m6_report.json
+```
+
+`benchmarks/run_all.py` 当前会串联 runtime build、pytest、CTest、small e2e、
+memory benchmark、latency benchmark、codegen validation、ResNet101/YOLOv10n
+M6 benchmark、论文表格导出和复现检查。
 
 ## 15. 任务依赖图
 

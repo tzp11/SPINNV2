@@ -25,6 +25,10 @@ def main() -> int:
                 ["cmake", "--build", "build/runtime"],
                 ["pytest", "tests/compiler", "tests/e2e", "tests/codegen"],
                 ["ctest", "--test-dir", "build/runtime"],
+                ["python", "tests/e2e/run_e2e.py", "--all-small", "--out-dir", "build/e2e_all_small"],
+                ["python", "benchmarks/run_memory.py", "--models", "mnist,lenet,resnet18"],
+                ["python", "benchmarks/run_latency.py", "--models", "mnist,lenet"],
+                ["python", "tests/codegen/run_codegen_test.py", "--models", "mnist,lenet"],
             ]
         )
 

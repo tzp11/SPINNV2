@@ -55,6 +55,10 @@ Completed and validated:
 - `benchmarks/run_m6_models.py` runs the ResNet101/YOLOv10n M6 large-model
   benchmark, `scripts/export_paper_tables.py` exports paper-ready CSV/Markdown
   tables, and `scripts/check_reproducibility.py` checks the frozen M6 thresholds.
+- `tests/e2e/model_zoo.py` and `tests/e2e/run_e2e.py` provide the generated
+  validation set from the execution plan: toy ops, MNIST/LeNet-style CNNs,
+  ResNet/MobileNet-style medium models, and a YOLO pre-NMS-style detection
+  subgraph.
 - `python -m spinnv2.compiler codegen` turns an SPK package into generated
   `model.c`, `model.h`, `main_test.c`, and `CMakeLists.txt` files.
 - Generated C embeds the SPK package as `static const` data, uses static
@@ -86,6 +90,10 @@ cmake -S runtime -B build/runtime
 cmake --build build/runtime
 ctest --test-dir build/runtime
 python benchmarks/run_all.py --skip-large-run
+python tests/e2e/run_e2e.py --all
+python benchmarks/run_memory.py --models mnist,lenet,resnet18
+python benchmarks/run_latency.py --models mnist,lenet
+python tests/codegen/run_codegen_test.py --models mnist,lenet
 ```
 
 The compiler can also emit a memory-plan CSV:
