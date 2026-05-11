@@ -1,0 +1,46 @@
+{
+  "name": "cpu_generic",
+  "word_size": 64,
+  "endianness": "little",
+  "alignment": 16,
+  "memory": {
+    "activation_arena_max": 67108864,
+    "scratch_arena_max": 8388608,
+    "allow_runtime_malloc": false
+  },
+  "features": [
+    "fp32"
+  ],
+  "layouts": [
+    "NCHW"
+  ],
+  "backends": [
+    "ref",
+    "cpu"
+  ],
+  "ops": {
+    "Add": [
+      "ref"
+    ],
+    "Conv": [
+      "im2col_gemm",
+      "ref"
+    ],
+    "Flatten": [
+      "ref"
+    ],
+    "Gemm": [
+      "direct",
+      "ref"
+    ],
+    "MaxPool": [
+      "ref"
+    ],
+    "Relu": [
+      "ref"
+    ],
+    "Softmax": [
+      "ref"
+    ]
+  }
+}

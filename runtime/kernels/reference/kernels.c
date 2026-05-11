@@ -4,6 +4,15 @@
 #include <stddef.h>
 #include <string.h>
 
+typedef int (*NodeKernelFn)(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+
+typedef struct {
+    uint16_t op_type;
+    uint16_t backend;
+    uint16_t kernel_kind;
+    NodeKernelFn fn;
+} KernelRegistryEntry;
+
 static size_t elem_count(const Spkv2TensorRecord *record) {
     size_t count = 1;
     for (uint16_t i = 0; i < record->rank; i++) {
@@ -22,7 +31,8 @@ static int get_attr(const Spkv2Context *ctx, const Spkv2NodeRecord *node, Spkv2A
     return 0;
 }
 
-static int kernel_add(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_add(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     const Spkv2TensorRecord *a_rec = ctx->tensors[node->inputs[0]].record;
     const Spkv2TensorRecord *b_rec = ctx->tensors[node->inputs[1]].record;
     const Spkv2TensorRecord *y_rec = ctx->tensors[node->outputs[0]].record;
@@ -38,7 +48,8 @@ static int kernel_add(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
-static int kernel_relu(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_relu(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     const Spkv2TensorRecord *x_rec = ctx->tensors[node->inputs[0]].record;
     const float *x = (const float *)ctx->tensors[node->inputs[0]].data;
     float *y = (float *)ctx->tensors[node->outputs[0]].data;
@@ -49,13 +60,15 @@ static int kernel_relu(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
-static int kernel_flatten(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_flatten(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     const Spkv2TensorRecord *x_rec = ctx->tensors[node->inputs[0]].record;
     memcpy(ctx->tensors[node->outputs[0]].data, ctx->tensors[node->inputs[0]].data, x_rec->size_bytes);
     return 0;
 }
 
-static int kernel_gemm(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_gemm(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     Spkv2AttrRecord attr;
     int rc = get_attr(ctx, node, &attr);
     if (rc != 0) return rc;
@@ -86,7 +99,44 @@ static int kernel_gemm(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
-static int kernel_softmax(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_gemm_cpu_direct(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
+    Spkv2AttrRecord attr;
+    int rc = get_attr(ctx, node, &attr);
+    if (rc != 0) return rc;
+    if (attr.trans_a || attr.trans_b) {
+        return kernel_gemm(ctx, node, scratch);
+    }
+
+    const Spkv2TensorRecord *a_rec = ctx->tensors[node->inputs[0]].record;
+    const Spkv2TensorRecord *b_rec = ctx->tensors[node->inputs[1]].record;
+    const float *a = (const float *)ctx->tensors[node->inputs[0]].data;
+    const float *b = (const float *)ctx->tensors[node->inputs[1]].data;
+    const float *c = node->input_count > 2 ? (const float *)ctx->tensors[node->inputs[2]].data : NULL;
+    float *y = (float *)ctx->tensors[node->outputs[0]].data;
+
+    int rows = (int)a_rec->shape[0];
+    int inner = (int)a_rec->shape[1];
+    int cols = (int)b_rec->shape[1];
+    for (int m = 0; m < rows; m++) {
+        const float *a_row = a + (size_t)m * inner;
+        float *y_row = y + (size_t)m * cols;
+        for (int n = 0; n < cols; n++) {
+            y_row[n] = c ? c[n] : 0.0f;
+        }
+        for (int k = 0; k < inner; k++) {
+            float av = attr.alpha * a_row[k];
+            const float *b_row = b + (size_t)k * cols;
+            for (int n = 0; n < cols; n++) {
+                y_row[n] += av * b_row[n];
+            }
+        }
+    }
+    return 0;
+}
+
+static int kernel_softmax(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     Spkv2AttrRecord attr;
     int rc = get_attr(ctx, node, &attr);
     if (rc != 0) return rc;
@@ -123,7 +173,8 @@ static int kernel_softmax(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
-static int kernel_conv(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_conv(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     Spkv2AttrRecord attr;
     int rc = get_attr(ctx, node, &attr);
     if (rc != 0) return rc;
@@ -165,6 +216,9 @@ static int kernel_conv(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
                             }
                         }
                     }
+                    if (attr.fused_activation == 1 && sum < 0.0f) {
+                        sum = 0.0f;
+                    }
                     y[((size_t)n * M * outH * outW) + ((size_t)m * outH * outW) + ((size_t)oh * outW) + ow] = sum;
                 }
             }
@@ -173,7 +227,69 @@ static int kernel_conv(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
-static int kernel_maxpool(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+static int kernel_conv_im2col(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    Spkv2AttrRecord attr;
+    int rc = get_attr(ctx, node, &attr);
+    if (rc != 0) return rc;
+    if (attr.group != 1) return -12;
+    if (!scratch && node->scratch_bytes > 0) return -13;
+
+    const Spkv2TensorRecord *x_rec = ctx->tensors[node->inputs[0]].record;
+    const Spkv2TensorRecord *w_rec = ctx->tensors[node->inputs[1]].record;
+    const Spkv2TensorRecord *y_rec = ctx->tensors[node->outputs[0]].record;
+    const float *x = (const float *)ctx->tensors[node->inputs[0]].data;
+    const float *w = (const float *)ctx->tensors[node->inputs[1]].data;
+    const float *bias = node->input_count > 2 ? (const float *)ctx->tensors[node->inputs[2]].data : NULL;
+    float *y = (float *)ctx->tensors[node->outputs[0]].data;
+    float *patch = (float *)scratch;
+
+    int N = (int)x_rec->shape[0];
+    int C = (int)x_rec->shape[1];
+    int H = (int)x_rec->shape[2];
+    int W = (int)x_rec->shape[3];
+    int M = (int)w_rec->shape[0];
+    int kH = (int)w_rec->shape[2];
+    int kW = (int)w_rec->shape[3];
+    int outH = (int)y_rec->shape[2];
+    int outW = (int)y_rec->shape[3];
+    int patch_len = C * kH * kW;
+
+    for (int n = 0; n < N; n++) {
+        for (int oh = 0; oh < outH; oh++) {
+            for (int ow = 0; ow < outW; ow++) {
+                int pi = 0;
+                for (int c = 0; c < C; c++) {
+                    for (int kh = 0; kh < kH; kh++) {
+                        int ih = oh * attr.strides[0] + kh * attr.dilations[0] - attr.pads[0];
+                        for (int kw = 0; kw < kW; kw++) {
+                            int iw = ow * attr.strides[1] + kw * attr.dilations[1] - attr.pads[1];
+                            float value = 0.0f;
+                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                                value = x[((size_t)n * C * H * W) + ((size_t)c * H * W) + ((size_t)ih * W) + iw];
+                            }
+                            patch[pi++] = value;
+                        }
+                    }
+                }
+                for (int m = 0; m < M; m++) {
+                    const float *w_row = w + (size_t)m * patch_len;
+                    float sum = bias ? bias[m] : 0.0f;
+                    for (int k = 0; k < patch_len; k++) {
+                        sum += patch[k] * w_row[k];
+                    }
+                    if (attr.fused_activation == 1 && sum < 0.0f) {
+                        sum = 0.0f;
+                    }
+                    y[((size_t)n * M * outH * outW) + ((size_t)m * outH * outW) + ((size_t)oh * outW) + ow] = sum;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int kernel_maxpool(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
+    (void)scratch;
     Spkv2AttrRecord attr;
     int rc = get_attr(ctx, node, &attr);
     if (rc != 0) return rc;
@@ -212,24 +328,86 @@ static int kernel_maxpool(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
     return 0;
 }
 
+static const KernelRegistryEntry REGISTRY[] = {
+    {SPKV2_OP_ADD, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_add},
+    {SPKV2_OP_CONV, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_conv},
+    {SPKV2_OP_CONV, SPKV2_BACKEND_CPU, SPKV2_KERNEL_IM2COL_GEMM, kernel_conv_im2col},
+    {SPKV2_OP_FLATTEN, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_flatten},
+    {SPKV2_OP_GEMM, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_gemm},
+    {SPKV2_OP_GEMM, SPKV2_BACKEND_CPU, SPKV2_KERNEL_DIRECT, kernel_gemm_cpu_direct},
+    {SPKV2_OP_MAXPOOL, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_maxpool},
+    {SPKV2_OP_RELU, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_relu},
+    {SPKV2_OP_SOFTMAX, SPKV2_BACKEND_REF, SPKV2_KERNEL_REFERENCE, kernel_softmax},
+};
+
+static const Spkv2KernelSpecRecord *kernel_spec_by_id(const Spkv2Context *ctx, uint32_t id) {
+    if (id == 0xFFFFFFFFu || id >= ctx->kernel_spec_count) return NULL;
+    return &ctx->kernel_spec_records[id];
+}
+
+static NodeKernelFn find_kernel(uint16_t op_type, const Spkv2KernelSpecRecord *spec) {
+    size_t count = sizeof(REGISTRY) / sizeof(REGISTRY[0]);
+    for (size_t i = 0; i < count; i++) {
+        if (REGISTRY[i].op_type == op_type &&
+            REGISTRY[i].backend == spec->backend &&
+            REGISTRY[i].kernel_kind == spec->kernel_kind) {
+            return REGISTRY[i].fn;
+        }
+    }
+    return NULL;
+}
+
+static const Spkv2KernelSpecRecord fallback_ref_spec = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    SPKV2_KERNEL_REFERENCE,
+    SPKV2_BACKEND_REF,
+    SPKV2_DTYPE_FP32,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0xFFFFFFFFu,
+    1,
+};
+
+static const Spkv2KernelSpecRecord *selected_spec(const Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+    const Spkv2KernelSpecRecord *spec = kernel_spec_by_id(ctx, node->kernel_spec_id);
+    if (!spec || spec->node_id != node->id) {
+        return &fallback_ref_spec;
+    }
+    return spec;
+}
+
+static int execute_with_spec(Spkv2Context *ctx, const Spkv2NodeRecord *node, const Spkv2KernelSpecRecord *spec) {
+    NodeKernelFn fn = find_kernel(node->op_type, spec);
+    if (!fn) return -99;
+    if (spec->scratch_bytes > ctx->scratch_size) return -14;
+    void *scratch = spec->scratch_bytes > 0 ? ctx->owned_scratch + spec->scratch_offset : NULL;
+    if (spec->scratch_bytes > 0 && spec->scratch_offset > ctx->scratch_size - spec->scratch_bytes) return -14;
+    return fn(ctx, node, scratch);
+}
+
 int spkv2_execute_node(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+    const Spkv2KernelSpecRecord *spec = selected_spec(ctx, node);
+    int rc = execute_with_spec(ctx, node, spec);
+    if (rc != -99) return rc;
+    const Spkv2KernelSpecRecord *fallback = kernel_spec_by_id(ctx, spec->fallback_kernel_spec_id);
+    if (fallback) return execute_with_spec(ctx, node, fallback);
+
+    Spkv2KernelSpecRecord ref_spec = fallback_ref_spec;
+    ref_spec.node_id = node->id;
     switch (node->op_type) {
     case SPKV2_OP_ADD:
-        return kernel_add(ctx, node);
     case SPKV2_OP_CONV:
-        return kernel_conv(ctx, node);
     case SPKV2_OP_FLATTEN:
-        return kernel_flatten(ctx, node);
     case SPKV2_OP_GEMM:
-        return kernel_gemm(ctx, node);
     case SPKV2_OP_MAXPOOL:
-        return kernel_maxpool(ctx, node);
     case SPKV2_OP_RELU:
-        return kernel_relu(ctx, node);
     case SPKV2_OP_SOFTMAX:
-        return kernel_softmax(ctx, node);
+        return execute_with_spec(ctx, node, &ref_spec);
     default:
         return -99;
     }
 }
-

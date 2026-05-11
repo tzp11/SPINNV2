@@ -24,6 +24,8 @@ typedef struct Spkv2Context {
     const Spkv2NodeRecord *node_records;
     const Spkv2MemoryPlanRecord *memory_plan_records;
     size_t memory_plan_count;
+    const Spkv2KernelSpecRecord *kernel_spec_records;
+    size_t kernel_spec_count;
     const uint8_t *attrs;
     size_t attrs_size;
     const uint8_t *weights;
@@ -32,6 +34,8 @@ typedef struct Spkv2Context {
     Spkv2TensorState *tensors;
     uint8_t *owned_arena;
     size_t arena_size;
+    uint8_t *owned_scratch;
+    size_t scratch_size;
 } Spkv2Context;
 
 int spkv2_execute_node(Spkv2Context *ctx, const Spkv2NodeRecord *node);

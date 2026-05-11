@@ -425,6 +425,22 @@ load_onnx()
 18. CheckTargetMemoryBudget
 ```
 
+M3 当前实现采用一个较小但可验证的默认 pipeline：
+
+```text
+EliminateIdentityDropout
+  -> ConstantFold
+  -> FuseConvBatchNorm
+  -> FuseConvRelu
+  -> EliminateDead
+```
+
+`python -m spinnv2.compiler compile` 默认启用该 pipeline，并提供
+`--disable-passes`、`--pass-pipeline` 和 `--pass-stats-json` 用于关闭、
+调整顺序和导出 pass 统计。SPK debug JSON 中也会包含 `pass_stats`。
+未被 pass 消除的 compiler-only op 不允许进入 runtime packaging，compiler
+会在写 SPK 前报错。
+
 ### 8.3 图优化边界
 
 Compiler 可以做：
@@ -1270,6 +1286,10 @@ compiler 在 target memory budget 超限时拒绝生成 SPK
 2. Conv+Relu fusion。
 3. constant folding。
 4. dead tensor elimination。
+5. Identity/Dropout elimination。
+6. CLI 默认 pass pipeline、可配置 pass 顺序、`pass_stats.json`。
+7. `benchmarks/compare_passes.py` 用于比较 pass 前后节点数、SPK 大小、
+   activation arena、可选 runtime latency 和输出误差。
 
 验收：
 
@@ -1279,23 +1299,46 @@ compiler 在 target memory budget 超限时拒绝生成 SPK
 推理时间或内存有改善
 ```
 
-### 17.5 M4：优化 kernel
-
-实现：
-
-1. im2col Conv。
-2. basic GEMM。
-3. packed weight 可选。
-4. SIMD 可选。
-5. KernelSpec 选择。
-6. backend fallback。
-
-验收：
+当前 M3 验证状态：
 
 ```text
-SPINNV2 Optimized > SPINNV2 Reference
-kernel fallback 结果可在 debug JSON 中追踪
+tests/compiler/unit/test_passes.py 覆盖各 pass 的结构正确性。
+tests/e2e/test_m1_e2e.py 覆盖 Conv+BN+Relu 融合后的 ORT 数值对齐。
+pytest tests/compiler tests/e2e 通过。
+ctest --test-dir build/runtime 通过。
 ```
+
+### 17.5 M4：KernelSpec、Backend 与优化 Kernel
+
+当前实现：
+
+1. `compiler/planner/kernel_spec.py` 根据 target profile 生成 KernelSpec，
+   并估算每个 node 的 scratch 需求。
+2. `cpu_ref` 选择全 reference kernel；`cpu_generic` 为 Conv 选择
+   `im2col_gemm`，为 Gemm 选择 `direct`，并为二者记录 reference fallback。
+3. SPK 写入 KernelSpec Section，Node Table 写入 `kernel_spec_id` 和
+   `scratch_bytes`，Header 写入 `scratch_arena_bytes`。
+4. Runtime loader 解析 KernelSpec Section，prepare 阶段分配共享 scratch arena。
+5. Runtime 通过 kernel registry 按 `op_type + backend + kernel_kind` dispatch；
+   如果 selected kernel 不存在，按 `fallback_kernel_spec_id` 回退到 reference。
+6. 当前优化 kernel 包括 CPU direct Gemm 和 Conv im2col-style scratch kernel。
+7. `benchmarks/compare_kernels.py` 用于比较 reference/optimized target profile
+   的 SPK 大小、activation/scratch 内存、fallback 统计、可选 latency 和输出误差。
+
+当前 M4 验证状态：
+
+```text
+tests/compiler/unit/test_kernel_spec.py 覆盖 KernelSpec 选择、fallback 和 scratch budget。
+tests/e2e/test_m1_e2e.py 覆盖 cpu_generic KernelSpec runtime 数值对齐。
+pytest tests/compiler tests/e2e 通过。
+ctest --test-dir build/runtime 通过。
+```
+
+M4 后续增强：
+
+1. packed weight transform。
+2. SIMD kernel。
+3. 更完整的大模型 latency benchmark。
 
 ### 17.6 M5：Codegen 与星载部署特性
 

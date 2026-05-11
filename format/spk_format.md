@@ -127,6 +127,10 @@ scratch_bytes
 
 The C definition is `Spkv2AttrRecord`. M1 uses a single fixed attribute record for the supported reference kernels. This is intentionally simple and will be split into op-specific compact attributes after the SPK format stabilizes.
 
+M3 extends the fixed attribute record with `fused_activation`. The current value
+`1` means Conv output applies fused Relu in the reference runtime; `0` means no
+fused activation.
+
 ## M2 Memory Plan
 
 M2 activates the Memory Plan section and header arena size fields.
@@ -174,3 +178,44 @@ last_use
 ```
 
 The Memory Plan section is primarily for verification, debugging, and paper experiments. Runtime uses Tensor Table offsets for the fast path.
+
+## M4 KernelSpec
+
+M4 activates the KernelSpec section and the node/header scratch fields.
+
+Compiler writes:
+
+```text
+header.scratch_arena_bytes
+NodeRecord.kernel_spec_id
+NodeRecord.scratch_bytes
+KernelSpec Section
+debug JSON metadata.kernel_specs
+debug JSON metadata.kernel_fallback_count
+debug JSON metadata.scratch_arena_bytes
+```
+
+The C definition for KernelSpec entries is `Spkv2KernelSpecRecord`.
+
+M4 KernelSpec records include:
+
+```text
+id
+node_id
+kernel_kind
+backend
+dtype
+layout
+weight_layout
+flags
+scratch_offset
+scratch_bytes
+fallback_kernel_spec_id
+required_feature_mask
+```
+
+Runtime maps `NodeRecord.kernel_spec_id` to a KernelSpec record, then dispatches
+through its compiled kernel registry using `op_type + backend + kernel_kind`. If
+the selected kernel is not present, Runtime follows `fallback_kernel_spec_id`.
+Current backend codes are `ref=1` and `cpu=2`; current kernel kind codes are
+`reference=1`, `direct=2`, and `im2col_gemm=3`.

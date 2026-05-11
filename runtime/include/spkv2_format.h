@@ -86,6 +86,20 @@ typedef enum {
     SPKV2_OP_SOFTMAX = 7
 } Spkv2OpType;
 
+typedef enum {
+    SPKV2_BACKEND_REF = 1,
+    SPKV2_BACKEND_CPU = 2,
+    SPKV2_BACKEND_SIMD = 3,
+    SPKV2_BACKEND_DELEGATE = 4
+} Spkv2Backend;
+
+typedef enum {
+    SPKV2_KERNEL_REFERENCE = 1,
+    SPKV2_KERNEL_DIRECT = 2,
+    SPKV2_KERNEL_IM2COL_GEMM = 3,
+    SPKV2_KERNEL_PACKED_GEMM = 4
+} Spkv2KernelKind;
+
 typedef struct {
     uint32_t id;
     uint16_t dtype;
@@ -117,6 +131,7 @@ typedef struct {
     uint32_t op_type;
     int32_t axis;
     int32_t group;
+    int32_t fused_activation;
     int32_t pads[4];
     int32_t strides[2];
     int32_t kernel_shape[2];
@@ -136,6 +151,21 @@ typedef struct {
     uint32_t first_use;
     uint32_t last_use;
 } Spkv2MemoryPlanRecord;
+
+typedef struct {
+    uint32_t id;
+    uint32_t node_id;
+    uint16_t kernel_kind;
+    uint16_t backend;
+    uint16_t dtype;
+    uint16_t layout;
+    uint16_t weight_layout;
+    uint16_t flags;
+    uint64_t scratch_offset;
+    uint64_t scratch_bytes;
+    uint32_t fallback_kernel_spec_id;
+    uint32_t required_feature_mask;
+} Spkv2KernelSpecRecord;
 
 #pragma pack(pop)
 

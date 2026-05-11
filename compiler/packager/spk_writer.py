@@ -8,6 +8,7 @@ from pathlib import Path
 
 from compiler.ir.graph import Graph, Node, Tensor
 from compiler.ir import types
+from compiler.planner.kernel_spec import KernelPlan, KernelSpec, select_kernel_specs
 from compiler.planner.memory_plan import MemoryPlan, plan_memory, write_memory_plan_csv
 
 
@@ -22,9 +23,14 @@ SECTION_NODE_TABLE = 4
 SECTION_ATTRIBUTES = 5
 SECTION_WEIGHTS = 6
 SECTION_MEMORY_PLAN = 7
+SECTION_KERNEL_SPEC = 8
 SECTION_STRING_TABLE = 10
 
 DTYPE_CODES = {types.DTYPE_FP32: 1}
+LAYOUT_CODES = {"NCHW": 1}
+WEIGHT_LAYOUT_CODES = {"OIHW": 1}
+BACKEND_CODES = {"ref": 1, "cpu": 2, "simd": 3, "delegate": 4}
+KERNEL_KIND_CODES = {"reference": 1, "direct": 2, "im2col_gemm": 3, "packed_gemm": 4}
 ROLE_CODES = {
     types.ROLE_INPUT: 1,
     types.ROLE_OUTPUT: 2,
@@ -54,8 +60,9 @@ HEADER_STRUCT = struct.Struct("<IHHHHIIIIIIQQQII")
 SECTION_STRUCT = struct.Struct("<IIQQII")
 TENSOR_STRUCT = struct.Struct("<IHHHH8IQQII")
 NODE_STRUCT = struct.Struct("<IHHHH8I4IIIII")
-ATTR_STRUCT = struct.Struct("<Iii4i2i2i2i2if")
+ATTR_STRUCT = struct.Struct("<Iiii4i2i2i2i2if")
 MEMORY_PLAN_STRUCT = struct.Struct("<IHHIQQII")
+KERNEL_SPEC_STRUCT = struct.Struct("<IIHHHHHHQQII")
 
 
 def write_spk(
@@ -64,10 +71,14 @@ def write_spk(
     target_profile: dict,
     *,
     memory_plan: MemoryPlan | None = None,
+    kernel_plan: KernelPlan | None = None,
     memory_plan_csv: str | Path | None = None,
 ) -> None:
     out_path = Path(out_path)
+    _validate_runtime_ops(graph)
     sections: list[tuple[int, bytes, int]] = []
+    if kernel_plan is None:
+        kernel_plan = select_kernel_specs(graph, target_profile)
     if memory_plan is None:
         memory_plan = plan_memory(
             graph,
@@ -83,10 +94,11 @@ def write_spk(
     sections.append((SECTION_METADATA, _metadata_bytes(graph), 1))
     sections.append((SECTION_TARGET_PROFILE, json.dumps(target_profile, sort_keys=True).encode("utf-8"), 1))
     sections.append((SECTION_TENSOR_TABLE, _tensor_table_bytes(graph, strings.offsets, weight_offsets, memory_plan), 4))
-    sections.append((SECTION_NODE_TABLE, _node_table_bytes(graph, attr_offsets), 4))
+    sections.append((SECTION_NODE_TABLE, _node_table_bytes(graph, attr_offsets, kernel_plan), 4))
     sections.append((SECTION_ATTRIBUTES, attrs, 4))
     sections.append((SECTION_WEIGHTS, weights, 16))
     sections.append((SECTION_MEMORY_PLAN, _memory_plan_bytes(graph, memory_plan), 4))
+    sections.append((SECTION_KERNEL_SPEC, _kernel_spec_bytes(kernel_plan.specs), 4))
     sections.append((SECTION_STRING_TABLE, strings.blob, 1))
 
     section_count = len(sections)
@@ -119,7 +131,7 @@ def write_spk(
         len(graph.outputs),
         sum(t.size_bytes for t in graph.tensors if t.role == types.ROLE_WEIGHT),
         memory_plan.planned_activation_bytes,
-        0,
+        kernel_plan.scratch_arena_bytes,
         _stable_profile_hash(target_profile),
         0,
     )
@@ -190,10 +202,12 @@ def _attr_bytes(node: Node) -> bytes:
     alpha = float(attrs.get("alpha", 1.0))
     trans_a = int(attrs.get("transA", 0))
     trans_b = int(attrs.get("transB", 0))
+    fused_activation = 1 if attrs.get("fused_activation") == "Relu" else 0
     return ATTR_STRUCT.pack(
         OP_CODES[node.op_type],
         axis,
         group,
+        fused_activation,
         pads[0],
         pads[1],
         pads[2],
@@ -258,12 +272,39 @@ def _memory_plan_bytes(graph: Graph, memory_plan: MemoryPlan) -> bytes:
     return bytes(blob)
 
 
-def _node_table_bytes(graph: Graph, attr_offsets: dict[int, tuple[int, int]]) -> bytes:
+def _kernel_spec_bytes(specs: list[KernelSpec]) -> bytes:
+    blob = bytearray()
+    for spec in specs:
+        blob.extend(
+            KERNEL_SPEC_STRUCT.pack(
+                spec.id,
+                spec.node_id,
+                KERNEL_KIND_CODES[spec.kernel_kind],
+                BACKEND_CODES[spec.backend],
+                DTYPE_CODES[spec.dtype],
+                LAYOUT_CODES[spec.layout],
+                WEIGHT_LAYOUT_CODES[spec.weight_layout],
+                0,
+                spec.scratch_offset,
+                spec.scratch_bytes,
+                spec.fallback_kernel_spec_id,
+                _feature_mask(spec.required_features or []),
+            )
+        )
+    return bytes(blob)
+
+
+def _node_table_bytes(
+    graph: Graph,
+    attr_offsets: dict[int, tuple[int, int]],
+    kernel_plan: KernelPlan,
+) -> bytes:
     blob = bytearray()
     for node in graph.nodes:
         inputs = node.inputs[:8] + [0] * (8 - len(node.inputs))
         outputs = node.outputs[:4] + [0] * (4 - len(node.outputs))
         attr_offset, attr_size = attr_offsets[node.id]
+        kernel_spec = kernel_plan.by_node[node.id]
         blob.extend(
             NODE_STRUCT.pack(
                 node.id,
@@ -275,8 +316,8 @@ def _node_table_bytes(graph: Graph, attr_offsets: dict[int, tuple[int, int]]) ->
                 *outputs,
                 attr_offset,
                 attr_size,
-                0,
-                0,
+                kernel_spec.id,
+                kernel_spec.scratch_bytes,
             )
         )
     return bytes(blob)
@@ -297,6 +338,7 @@ def _debug_json(graph: Graph, memory_plan: MemoryPlan) -> dict:
         "model_name": graph.model_name,
         "inputs": graph.inputs,
         "outputs": graph.outputs,
+        "metadata": graph.metadata,
         "memory": {
             "naive_activation_bytes": memory_plan.naive_activation_bytes,
             "planned_activation_bytes": memory_plan.planned_activation_bytes,
@@ -352,3 +394,17 @@ def _stable_profile_hash(profile: dict) -> int:
         value ^= byte
         value = (value * 16777619) & 0xFFFFFFFF
     return value
+
+
+def _validate_runtime_ops(graph: Graph) -> None:
+    unsupported = sorted({node.op_type for node in graph.nodes if node.op_type not in OP_CODES})
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(f"graph still contains unsupported runtime op(s): {names}")
+
+
+def _feature_mask(features: list[str]) -> int:
+    mask = 0
+    if types.DTYPE_FP32 in features:
+        mask |= 1
+    return mask

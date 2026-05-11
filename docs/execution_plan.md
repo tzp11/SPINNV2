@@ -321,6 +321,39 @@ model, naive_bytes, bestfit_bytes, external_io_bytes, reduction_ratio
 | `spk_size_before/after` | 不应异常增大 |
 | `runtime_latency_before/after` | 不退化，融合场景应改善 |
 
+### 8.5 M3 当前实现状态
+
+M3 已实现为 compiler 默认开启的图优化 pipeline：
+
+```text
+EliminateIdentityDropout
+  -> ConstantFold
+  -> FuseConvBatchNorm
+  -> FuseConvRelu
+  -> EliminateDead
+```
+
+当前落地产物：
+
+1. `compiler/passes/manager.py` 提供 pass registry、默认顺序和可配置 pipeline。
+2. `compiler/passes/transforms.py` 实现 Identity/Dropout 删除、常量折叠、
+   Conv+BN 融合、Conv+Relu 融合和 dead-node/tensor elimination。
+3. `python -m spinnv2.compiler compile` 默认运行 M3 pipeline，并提供
+   `--disable-passes`、`--pass-pipeline`、`--pass-stats-json`。
+4. SPK debug JSON 写入 `metadata.pass_stats`，可用于节点数变化和 pass
+   命中统计。
+5. `benchmarks/compare_passes.py` 可生成优化前后对比报告；提供输入二进制时，
+   还会通过 `spkv2_run` 采集 latency 和输出误差。
+6. `tests/compiler/unit/test_passes.py` 覆盖 M3 pass 结构正确性。
+7. `tests/e2e/test_m1_e2e.py` 增加 Conv+BN+Relu 融合后的 ORT 数值对齐。
+
+边界说明：
+
+1. M3 仍限定 fp32、固定 shape、当前 M1 runtime op 集。
+2. compiler-only op 必须被 pass 消除后才能写入 SPK；否则 compiler 报错，
+   不进入 runtime。
+3. 大模型 benchmark 和论文级图表自动化放到 M6 继续扩展。
+
 ## 9. M4：KernelSpec、Target Profile 与优化 kernel
 
 ### 9.1 目标
@@ -369,6 +402,36 @@ memory_limited_1mb.json
 | `scratch_oob_count` | 0 |
 | `target_mismatch_count` | 0 |
 | `numerical_error` | 满足 M1 阈值 |
+
+### 9.5 M4 当前实现状态
+
+M4 已实现 target profile -> KernelSpec -> runtime registry 的最小闭环。
+
+当前落地产物：
+
+1. `compiler/planner/kernel_spec.py` 生成 KernelSpec、scratch 估算和 fallback
+   关系，并写入 `graph.metadata.kernel_specs`、`kernel_fallback_count` 和
+   `scratch_arena_bytes`。
+2. `cpu_ref.json` 保持全 reference；`cpu_generic.json` 选择 Conv
+   `im2col_gemm` 和 Gemm `direct`；`memory_limited_1mb.json` 用于 memory/scratch
+   budget 验证。
+3. SPK 写入 KernelSpec Section，Node Table 写入 `kernel_spec_id` 和
+   `scratch_bytes`，Header 写入 `scratch_arena_bytes`。
+4. Runtime loader 解析 KernelSpec Section；prepare 阶段分配共享 scratch arena；
+   executor 通过 registry 命中 selected kernel，无法命中时按
+   `fallback_kernel_spec_id` 回退 reference。
+5. 当前 CPU 优化 kernel 包括 direct Gemm 和 Conv im2col-style scratch kernel。
+6. `benchmarks/compare_kernels.py` 可比较 `cpu_ref` 与 `cpu_generic` 的 SPK 大小、
+   activation/scratch 内存、fallback 统计、可选 latency 和输出误差。
+7. `tests/compiler/unit/test_kernel_spec.py` 覆盖 KernelSpec 选择、fallback 和
+   scratch budget；`tests/e2e/test_m1_e2e.py` 覆盖 `cpu_generic` runtime 数值对齐。
+
+边界说明：
+
+1. M4 仍限定 fp32、NCHW、固定 shape、当前 M1/M3 runtime op 集。
+2. packed weight 和 SIMD 属于 M4 可选项，当前保留为后续增强。
+3. `optimized_latency < reference_latency` 通过 `benchmarks/compare_kernels.py`
+   采集，具体论文级表格放到 M6 汇总。
 
 ## 10. M5：Codegen 与星载部署特性
 

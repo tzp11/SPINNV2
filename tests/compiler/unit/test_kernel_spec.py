@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import pytest
+
+from compiler.ir import types
+from compiler.ir.graph import Graph, Node, Tensor
+from compiler.planner.kernel_spec import select_kernel_specs
+from compiler.target.profile import load_target_profile
+
+
+def test_cpu_ref_selects_reference_kernels_only():
+    graph = _conv_gemm_graph()
+    plan = select_kernel_specs(graph, load_target_profile("cpu_ref"))
+
+    selected = [plan.by_node[node.id] for node in graph.nodes]
+    assert [spec.backend for spec in selected] == ["ref", "ref"]
+    assert [spec.kernel_kind for spec in selected] == ["reference", "reference"]
+    assert plan.scratch_arena_bytes == 0
+    assert plan.fallback_count == 0
+
+
+def test_cpu_generic_selects_optimized_conv_and_gemm_with_ref_fallbacks():
+    graph = _conv_gemm_graph()
+    plan = select_kernel_specs(graph, load_target_profile("cpu_generic"))
+
+    conv_spec = plan.by_node[0]
+    gemm_spec = plan.by_node[1]
+    assert (conv_spec.backend, conv_spec.kernel_kind) == ("cpu", "im2col_gemm")
+    assert conv_spec.scratch_bytes == 16
+    assert conv_spec.fallback_kernel_spec_id != 0xFFFFFFFF
+    assert (gemm_spec.backend, gemm_spec.kernel_kind) == ("cpu", "direct")
+    assert gemm_spec.fallback_kernel_spec_id != 0xFFFFFFFF
+    assert plan.scratch_arena_bytes == 16
+    assert graph.metadata["kernel_fallback_count"] == 0
+
+
+def test_scratch_budget_violation_raises():
+    graph = _conv_gemm_graph()
+    profile = load_target_profile("cpu_generic")
+    profile["memory"]["scratch_arena_max"] = 8
+
+    with pytest.raises(MemoryError):
+        select_kernel_specs(graph, profile)
+
+
+def _conv_gemm_graph() -> Graph:
+    graph = Graph(model_name="kernels")
+    for tensor in [
+        Tensor(0, "input", types.DTYPE_FP32, [1, 1, 2, 2], types.ROLE_INPUT),
+        Tensor(1, "conv_w", types.DTYPE_FP32, [1, 1, 1, 1], types.ROLE_WEIGHT, data=b"\x00" * 4),
+        Tensor(2, "conv_out", types.DTYPE_FP32, [1, 1, 2, 2], types.ROLE_ACTIVATION),
+        Tensor(3, "gemm_w", types.DTYPE_FP32, [4, 2], types.ROLE_WEIGHT, data=b"\x00" * 32),
+        Tensor(4, "output", types.DTYPE_FP32, [1, 2], types.ROLE_OUTPUT),
+    ]:
+        graph.add_tensor(tensor)
+    graph.inputs = [0]
+    graph.outputs = [4]
+    graph.add_node(Node(0, "Conv", [0, 1], [2], {"kernel_shape": [1, 1]}))
+    graph.add_node(Node(1, "Gemm", [2, 3], [4]))
+    return graph

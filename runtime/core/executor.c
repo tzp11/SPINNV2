@@ -12,6 +12,7 @@ int spkv2_prepare(Spkv2Context *ctx, void *arena, size_t arena_size) {
     if (!ctx) return -1;
 
     uint64_t required = ctx->header.activation_arena_bytes;
+    uint64_t scratch_required = ctx->header.scratch_arena_bytes;
 
     if (arena) {
         if (arena_size < required) return -2;
@@ -22,6 +23,12 @@ int spkv2_prepare(Spkv2Context *ctx, void *arena, size_t arena_size) {
         if (!arena && required > 0) return -1;
         ctx->owned_arena = (uint8_t *)arena;
         ctx->arena_size = (size_t)required;
+    }
+
+    if (scratch_required > 0) {
+        ctx->owned_scratch = (uint8_t *)calloc(1, (size_t)scratch_required);
+        if (!ctx->owned_scratch) return -1;
+        ctx->scratch_size = (size_t)scratch_required;
     }
 
     for (uint32_t i = 0; i < ctx->header.num_tensors; i++) {

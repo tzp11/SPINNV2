@@ -66,8 +66,8 @@ def import_onnx(path: str | Path) -> Graph:
         ensure_tensor(init_name, types.ROLE_WEIGHT)
 
     for node_proto in graph_proto.node:
-        if node_proto.op_type not in types.SUPPORTED_M1_OPS:
-            raise ValueError(f"unsupported M1 op: {node_proto.op_type}")
+        if node_proto.op_type not in types.SUPPORTED_IMPORT_OPS:
+            raise ValueError(f"unsupported import op: {node_proto.op_type}")
 
         input_ids = [ensure_tensor(name) for name in node_proto.input if name]
         output_ids = [ensure_tensor(name) for name in node_proto.output if name]
@@ -128,4 +128,3 @@ def _extract_attrs(node: onnx.NodeProto) -> dict[str, Any]:
         else:
             attrs[attr.name] = value
     return attrs
-

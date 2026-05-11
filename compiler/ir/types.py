@@ -20,3 +20,10 @@ SUPPORTED_M1_OPS = {
     "Softmax",
 }
 
+COMPILER_ONLY_OPS = {
+    "BatchNormalization",
+    "Dropout",
+    "Identity",
+}
+
+SUPPORTED_IMPORT_OPS = SUPPORTED_M1_OPS | COMPILER_ONLY_OPS
