@@ -526,18 +526,34 @@ SPK、runtime reference kernel、静态内存规划和 ORT 对齐工具能承受
    参数。
 3. `benchmarks/run_m6_models.py` 固化大模型 op 统计、编译、ORT baseline、
    runtime 运行和误差指标导出。
+4. `scripts/export_paper_tables.py` 从 `m6_report.json` 导出 correctness、
+   memory、op count 和 freeze 表格的 CSV/Markdown。
+5. `scripts/check_reproducibility.py` 检查 M6 report 的模型、target、编译、
+   runtime、内存收益和数值阈值。
+6. `benchmarks/run_all.py` 串联 runtime build、pytest、CTest、M6 benchmark、
+   论文表格导出和复现检查。
 
 当前结果：
 
 | 模型 | 编译 | runtime | 内存规划 | ORT 对齐 |
 |---|---|---|---|---|
-| ResNet101 | 成功，241 nodes | 58.91s / 189244KB | 137803680 -> 14249984 bytes | top1 一致，max_abs=0.0546875，mean_abs=0.00544044 |
-| YOLOv10n | 成功，308 nodes | 30.59s / 35148KB | 307286000 -> 24576000 bytes | score max_abs=5.46e-08；top10 max_abs=6.26e-04，class 10/10 |
+| ResNet101 | 成功，241 nodes | 60.91s | 137803680 -> 14249984 bytes | top1 一致，max_abs=0.0546875，mean_abs=0.00544044 |
+| YOLOv10n | 成功，308 nodes | 30.44s | 307286000 -> 24576000 bytes | score max_abs=5.46e-08；top10 max_abs=6.26e-04，class 10/10 |
 
 YOLOv10n 全量 300 行输出中，低置信度候选的 TopK 排序会因 fp32 reference
 累积误差出现候选框/类别分叉；M6 论文实验应同时报告 score 误差、topN 高置信
 行误差、class match count 和全量 max/mean error，避免只用单个全量 max_abs
 掩盖实际行为。
+
+正式 M6 结果来源：
+
+```text
+build/m6_final/m6_report.json
+build/m6_paper_tables/correctness.csv
+build/m6_paper_tables/memory.csv
+build/m6_paper_tables/ops.csv
+build/m6_paper_tables/freeze.csv
+```
 
 ### 11.4 冻结标准
 

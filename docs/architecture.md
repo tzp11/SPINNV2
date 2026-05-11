@@ -1397,6 +1397,8 @@ ctest --test-dir build/runtime 通过。
    reference Conv。
 4. `benchmarks/run_m6_models.py` 固化 ResNet101/YOLOv10n 的 op 统计、编译、
    ORT baseline、runtime 执行和误差指标采集。
+5. `scripts/export_paper_tables.py` 和 `scripts/check_reproducibility.py` 固化
+   论文表格数据源和复现实验阈值；`benchmarks/run_all.py` 串联 M6 全流程。
 
 当前 M6 验证状态：
 
@@ -1406,14 +1408,14 @@ ResNet101:
   FuseConvRelu: 67。
   naive activation: 137803680 bytes。
   planned activation: 14249984 bytes。
-  runtime: 58.91s，maxrss 189244KB。
+  runtime: 60.91s。
   ORT 对齐: top1_equal=true，max_abs_error=0.0546875，mean_abs_error=0.00544044。
 
 YOLOv10n:
   compile 成功，308 nodes。
   naive activation: 307286000 bytes。
   planned activation: 24576000 bytes。
-  runtime: 30.59s，maxrss 35148KB。
+  runtime: 30.44s。
   ORT 对齐: score_max_abs_error=5.46e-08，score_mean_abs_error=1.08e-08。
   top10 rows: max_abs_error=6.26e-04，mean_abs_error=9.86e-05，class 10/10。
   top20+ 低置信度行受 TopK 微小数值差影响，候选框/类别顺序会分叉；
@@ -1421,6 +1423,7 @@ YOLOv10n:
 
 pytest tests/compiler tests/e2e tests/codegen 通过。
 ctest --test-dir build/runtime 通过。
+python benchmarks/run_all.py --skip-tests --out-dir build/m6_final --tables-dir build/m6_paper_tables 通过。
 ```
 
 ## 18. 论文贡献表述建议

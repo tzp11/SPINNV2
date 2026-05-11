@@ -52,6 +52,9 @@ Completed and validated:
   exercises M4 memory-budget checks.
 - `benchmarks/compare_kernels.py` compares reference and optimized target
   profiles, with optional runtime latency and output error collection.
+- `benchmarks/run_m6_models.py` runs the ResNet101/YOLOv10n M6 large-model
+  benchmark, `scripts/export_paper_tables.py` exports paper-ready CSV/Markdown
+  tables, and `scripts/check_reproducibility.py` checks the frozen M6 thresholds.
 - `python -m spinnv2.compiler codegen` turns an SPK package into generated
   `model.c`, `model.h`, `main_test.c`, and `CMakeLists.txt` files.
 - Generated C embeds the SPK package as `static const` data, uses static
@@ -82,6 +85,7 @@ pytest tests/codegen
 cmake -S runtime -B build/runtime
 cmake --build build/runtime
 ctest --test-dir build/runtime
+python benchmarks/run_all.py --skip-large-run
 ```
 
 The compiler can also emit a memory-plan CSV:
