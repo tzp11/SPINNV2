@@ -64,6 +64,20 @@ def test_scratch_budget_violation_raises():
         select_kernel_specs(graph, profile)
 
 
+def test_simd_im2col_scratch_is_sized_for_one_tile_not_full_output():
+    graph = _conv_only_graph(
+        [1, 64, 512, 512],
+        [128, 64, 3, 3],
+        [1, 128, 512, 512],
+        {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]},
+    )
+    plan = select_kernel_specs(graph, load_target_profile("cpu_generic"))
+
+    assert plan.by_node[0].kernel_kind == "im2col_gemm"
+    assert plan.by_node[0].scratch_bytes == 64 * 3 * 3 * 512 * 4
+    assert plan.scratch_arena_bytes == plan.by_node[0].scratch_bytes
+
+
 def _conv_gemm_graph() -> Graph:
     graph = Graph(model_name="kernels")
     for tensor in [

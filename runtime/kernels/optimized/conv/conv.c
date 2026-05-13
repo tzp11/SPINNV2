@@ -262,6 +262,83 @@ static void im2col_full(const float *im, int C, int H, int W,
     }
 }
 
+static void im2col_full_tile(const float *im, int C, int H, int W,
+                             int kH, int kW, int sH, int sW, int pH, int pW,
+                             int dH, int dW, int outW, int tile_start,
+                             int tile_count, float *col)
+{
+    int row = 0;
+    for (int c = 0; c < C; c++) {
+        const float *xc = im + (size_t)c * H * W;
+        for (int kh = 0; kh < kH; kh++) {
+            for (int kw = 0; kw < kW; kw++) {
+                float *dst = col + (size_t)row * tile_count;
+                for (int t = 0; t < tile_count; t++) {
+                    int out_index = tile_start + t;
+                    int oh = out_index / outW;
+                    int ow = out_index - oh * outW;
+                    int ih = oh * sH - pH + kh * dH;
+                    int iw = ow * sW - pW + kw * dW;
+                    dst[t] = (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                               ? xc[(size_t)ih * W + iw]
+                               : 0.0f;
+                }
+                row++;
+            }
+        }
+    }
+}
+
+static void im2col_3x3_s1p1_tile(const float *im, int C, int H, int W,
+                                 int tile_start, int tile_count, float *col)
+{
+    int row = 0;
+    for (int c = 0; c < C; c++) {
+        const float *xc = im + (size_t)c * H * W;
+        for (int kh = 0; kh < 3; kh++) {
+            for (int kw = 0; kw < 3; kw++) {
+                float *dst = col + (size_t)row * tile_count;
+                int done = 0;
+                while (done < tile_count) {
+                    int out_index = tile_start + done;
+                    int oh = out_index / W;
+                    int ow0 = out_index - oh * W;
+                    int len = SIMD_MIN(tile_count - done, W - ow0);
+                    int ih = oh - 1 + kh;
+                    float *dst_seg = dst + done;
+
+                    if (ih < 0 || ih >= H) {
+                        memset(dst_seg, 0, (size_t)len * sizeof(float));
+                        done += len;
+                        continue;
+                    }
+
+                    int ow1 = ow0 + len;
+                    int valid0 = 1 - kw;
+                    int valid1 = W + 1 - kw;
+                    int copy0 = ow0 > valid0 ? ow0 : valid0;
+                    int copy1 = ow1 < valid1 ? ow1 : valid1;
+
+                    if (copy0 > ow0) {
+                        memset(dst_seg, 0, (size_t)(copy0 - ow0) * sizeof(float));
+                    }
+                    if (copy1 > copy0) {
+                        memcpy(dst_seg + (copy0 - ow0),
+                               xc + (size_t)ih * W + (copy0 + kw - 1),
+                               (size_t)(copy1 - copy0) * sizeof(float));
+                    }
+                    if (ow1 > copy1) {
+                        memset(dst_seg + (copy1 - ow0), 0,
+                               (size_t)(ow1 - copy1) * sizeof(float));
+                    }
+                    done += len;
+                }
+                row++;
+            }
+        }
+    }
+}
+
 
 
 static void bias_init_row(float *y, float bias_val, int N)
@@ -733,6 +810,14 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
         for (int n = 0; n < N_batch; n++) {
             float *y_n = y + (size_t)n * C_out * spatial;
 
+            if (group == 1 && packed_w) {
+                const float *x_n = x + (size_t)n * C_in * H * W;
+                sgemm_nn_packed_a_epilogue(C_out, spatial, C_in,
+                                           packed_w, x_n, spatial, y_n, spatial,
+                                           bias, attr.fused_activation, 1);
+                continue;
+            }
+
             for (int g = 0; g < group; g++) {
                 const float *x_g = x + (size_t)n * C_in * H * W + (size_t)g * C_in_g * H * W;
                 const float *w_g = w + (size_t)g * C_out_g * K_g;
@@ -758,10 +843,16 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
         return 0;
     }
 
-    /* ── General conv: im2col + SGEMM per group ── */
-    /* Full im2col into scratch (scratch is sized for K_g × spatial) */
+    /* ── General conv: tiled im2col + SGEMM per group ── */
+    int scratch_floats = node->scratch_bytes > 0 ? (int)(node->scratch_bytes / sizeof(float)) : 0;
+    int tile_n = K_g > 0 ? scratch_floats / K_g : 0;
+    if (tile_n <= 0) return -13;
+    if (tile_n > SGEMM_NC) tile_n = SGEMM_NC;
+    if (tile_n > spatial) tile_n = spatial;
+
     for (int n = 0; n < N_batch; n++) {
         float *y_n = y + (size_t)n * C_out * spatial;
+        int use_epilogue = (group == 1 && packed_w != NULL);
 
         for (int g = 0; g < group; g++) {
             const float *x_g = x + (size_t)n * C_in * H * W + (size_t)g * C_in_g * H * W;
@@ -769,34 +860,42 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
             const float *bias_g = bias ? bias + g * C_out_g : NULL;
             float *y_g = y_n + (size_t)g * C_out_g * spatial;
 
-            /* initialise Y with bias */
-            for (int m = 0; m < C_out_g; m++) {
-                float bv = bias_g ? bias_g[m] : 0.0f;
-                bias_init_row(y_g + (size_t)m * spatial, bv, spatial);
-            }
+            for (int start = 0; start < spatial; start += tile_n) {
+                int count = SIMD_MIN(tile_n, spatial - start);
 
-            /* im2col */
-            if (is_3x3_s1_p1_d1) {
-                im2col_3x3_s1p1(x_g, C_in_g, H, W, col);
-            } else {
-                im2col_full(x_g, C_in_g, H, W, kH, kW,
-                            attr.strides[0], attr.strides[1],
-                            attr.pads[0], attr.pads[1],
-                            attr.dilations[0], attr.dilations[1],
-                            outH, outW, col);
-            }
+                if (!use_epilogue) {
+                    for (int m = 0; m < C_out_g; m++) {
+                        float bv = bias_g ? bias_g[m] : 0.0f;
+                        bias_init_row(y_g + (size_t)m * spatial + start, bv, count);
+                    }
+                }
 
-            /* SGEMM: Y += W × col */
-            if (packed_w && g == 0)
-                sgemm_nn_packed_a(C_out_g, spatial, K_g,
-                                   packed_w, col, spatial, y_g, spatial);
-            else
-                sgemm_nn(C_out_g, spatial, K_g,
-                         w_g, K_g, col, spatial, y_g, spatial);
+                if (is_3x3_s1_p1_d1) {
+                    im2col_3x3_s1p1_tile(x_g, C_in_g, H, W, start, count, col);
+                } else {
+                    im2col_full_tile(x_g, C_in_g, H, W, kH, kW,
+                                     attr.strides[0], attr.strides[1],
+                                     attr.pads[0], attr.pads[1],
+                                     attr.dilations[0], attr.dilations[1],
+                                     outW, start, count, col);
+                }
+
+                if (use_epilogue) {
+                    sgemm_nn_packed_a_epilogue(C_out_g, count, K_g,
+                                               packed_w, col, count,
+                                               y_g + start, spatial,
+                                               bias_g, attr.fused_activation, 1);
+                } else {
+                    sgemm_nn(C_out_g, count, K_g,
+                             w_g, K_g, col, count,
+                             y_g + start, spatial);
+                }
+            }
         }
 
         /* fused activation */
-        fused_activation_pass(y_n, (size_t)C_out * spatial, attr.fused_activation);
+        if (!use_epilogue)
+            fused_activation_pass(y_n, (size_t)C_out * spatial, attr.fused_activation);
     }
     return 0;
 }

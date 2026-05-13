@@ -166,6 +166,64 @@ static uint64_t align16(uint64_t value) {
     return (value + 15u) & ~15u;
 }
 
+enum { PREP_SGEMM_MR = 6 };
+
+static void *pack_conv_weight_for_sgemm(int M, int K, const float *weight, int lda) {
+    int m_blocks = (M + PREP_SGEMM_MR - 1) / PREP_SGEMM_MR;
+    size_t total = (size_t)m_blocks * (size_t)K * PREP_SGEMM_MR;
+    float *packed = (float *)spkv2_platform_malloc(total * sizeof(float));
+    if (!packed) return NULL;
+
+    float *dst = packed;
+    for (int m0 = 0; m0 < M; m0 += PREP_SGEMM_MR) {
+        int cm = M - m0 < PREP_SGEMM_MR ? M - m0 : PREP_SGEMM_MR;
+        for (int k = 0; k < K; k++) {
+            int m = 0;
+            for (; m < cm; m++) {
+                dst[m] = weight[(size_t)(m0 + m) * (size_t)lda + (size_t)k];
+            }
+            for (; m < PREP_SGEMM_MR; m++) {
+                dst[m] = 0.0f;
+            }
+            dst += PREP_SGEMM_MR;
+        }
+    }
+    return packed;
+}
+
+static int prepare_conv_weight_caches(Spkv2Context *ctx) {
+    if (!ctx || !ctx->node_cache) return 0;
+
+    for (uint32_t i = 0; i < ctx->header.num_nodes; i++) {
+        const Spkv2NodeRecord *node = &ctx->node_records[i];
+        if (node->op_type != SPKV2_OP_CONV || node->input_count < 2) continue;
+        if (node->id >= ctx->node_cache_count || ctx->node_cache[node->id]) continue;
+
+        const Spkv2KernelSpecRecord *spec = prof_kernel_spec(ctx, node);
+        if (!spec || spec->backend != SPKV2_BACKEND_SIMD) continue;
+        if (spec->kernel_kind != SPKV2_KERNEL_IM2COL_GEMM &&
+            spec->kernel_kind != SPKV2_KERNEL_POINTWISE_1X1) {
+            continue;
+        }
+
+        Spkv2AttrRecord attr;
+        if (prof_get_attr(ctx, node, &attr) != 0) continue;
+        if (attr.group != 1) continue;
+
+        const Spkv2TensorRecord *w_rec = ctx->tensors[node->inputs[1]].record;
+        const float *w = (const float *)ctx->tensors[node->inputs[1]].data;
+        if (!w_rec || !w || w_rec->rank != 4) continue;
+
+        int out_c = (int)w_rec->shape[0];
+        int k = (int)(w_rec->shape[1] * w_rec->shape[2] * w_rec->shape[3]);
+        if (out_c <= 0 || k <= 0) continue;
+
+        ctx->node_cache[node->id] = pack_conv_weight_for_sgemm(out_c, k, w, k);
+        if (!ctx->node_cache[node->id]) return -1;
+    }
+    return 0;
+}
+
 int spkv2_prepare(Spkv2Context *ctx, void *arena, size_t arena_size) {
     return spkv2_prepare_with_scratch(ctx, arena, arena_size, NULL, 0);
 }
@@ -223,6 +281,8 @@ int spkv2_prepare_with_scratch(
             ctx->tensors[i].data = ((uint8_t *)arena) + record->data_offset;
         }
     }
+    int cache_rc = prepare_conv_weight_caches(ctx);
+    if (cache_rc != 0) return cache_rc;
     return 0;
 }
 

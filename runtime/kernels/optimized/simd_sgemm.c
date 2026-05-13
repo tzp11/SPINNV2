@@ -21,8 +21,8 @@
 #define SGEMM_MR 6
 #define SGEMM_NR 16
 #define SGEMM_KC 256          /* K-tile */
-#define SGEMM_NC 128          /* N-tile */
-#define OMP_MIN_M 24          /* skip OMP for tiny M */
+#define SGEMM_NC 512          /* N-tile */
+#define OMP_MIN_OPS 262144LL  /* skip OMP for tiny GEMM */
 #define PF_AHEAD 8            /* prefetch lookahead steps */
 
 
@@ -83,13 +83,26 @@ float *sgemm_pack_a_impl(int M, int K, const float *A, int lda)
     _mm_prefetch((const char*)(pa + ((KK) + PF_AHEAD) * SGEMM_MR), _MM_HINT_T0); \
     _mm_prefetch((const char*)(pb + ((KK) + PF_AHEAD) * SGEMM_NR), _MM_HINT_T0);
 
+static inline __m256 apply_epilogue_vec(__m256 v, const float *bias, int row, int act_type)
+{
+    if (bias) v = _mm256_add_ps(v, _mm256_set1_ps(bias[row]));
+    return apply_activation_avx2(v, act_type);
+}
+
+static inline float apply_epilogue_scalar(float v, const float *bias, int row, int act_type)
+{
+    if (bias) v += bias[row];
+    return apply_activation_scalar_simd(v, act_type);
+}
 
 
 static void micro_6x16_packed_a(const float * __restrict__ pa,
                                  const float * __restrict__ pb,
                                  float * __restrict__ C, int ldc,
                                  int ck, int actual_m, int actual_n,
-                                 int zero_mode)
+                                 int zero_mode,
+                                 const float *bias, int bias_row,
+                                 int act_type, int final_k)
 {
     __m256 c0L, c0R, c1L, c1R, c2L, c2R, c3L, c3R, c4L, c4R, c5L, c5R;
     __m256 bL, bR, va;
@@ -146,10 +159,27 @@ static void micro_6x16_packed_a(const float * __restrict__ pa,
         _mm256_storeu_ps(out_block+80,   c5L); _mm256_storeu_ps(out_block+80+8,   c5R);
         for (int m = 0; m < actual_m; m++)
             for (int n = 0; n < actual_n; n++) {
-                if (zero_mode) C[m * ldc + n]  = out_block[m * 16 + n];
-                else           C[m * ldc + n] += out_block[m * 16 + n];
+                float value = zero_mode ? out_block[m * 16 + n]
+                                        : C[m * ldc + n] + out_block[m * 16 + n];
+                if (final_k)
+                    value = apply_epilogue_scalar(value, bias, bias_row + m, act_type);
+                C[m * ldc + n] = value;
             }
     } else {
+        if (final_k) {
+            c0L = apply_epilogue_vec(c0L, bias, bias_row + 0, act_type);
+            c0R = apply_epilogue_vec(c0R, bias, bias_row + 0, act_type);
+            c1L = apply_epilogue_vec(c1L, bias, bias_row + 1, act_type);
+            c1R = apply_epilogue_vec(c1R, bias, bias_row + 1, act_type);
+            c2L = apply_epilogue_vec(c2L, bias, bias_row + 2, act_type);
+            c2R = apply_epilogue_vec(c2R, bias, bias_row + 2, act_type);
+            c3L = apply_epilogue_vec(c3L, bias, bias_row + 3, act_type);
+            c3R = apply_epilogue_vec(c3R, bias, bias_row + 3, act_type);
+            c4L = apply_epilogue_vec(c4L, bias, bias_row + 4, act_type);
+            c4R = apply_epilogue_vec(c4R, bias, bias_row + 4, act_type);
+            c5L = apply_epilogue_vec(c5L, bias, bias_row + 5, act_type);
+            c5R = apply_epilogue_vec(c5R, bias, bias_row + 5, act_type);
+        }
         _mm256_storeu_ps(C,         c0L); _mm256_storeu_ps(C+8,         c0R);
         _mm256_storeu_ps(C+ldc,     c1L); _mm256_storeu_ps(C+ldc+8,     c1R);
         _mm256_storeu_ps(C+2*ldc,   c2L); _mm256_storeu_ps(C+2*ldc+8,   c2R);
@@ -262,6 +292,21 @@ static float *get_bpack_buf(size_t need)
     return s_bpack_buf;
 }
 
+int sgemm_should_parallelize(int M, int N, int K, int allow_parallel)
+{
+    if (!allow_parallel) return 0;
+#ifdef _OPENMP
+    if (omp_get_max_threads() <= 1) return 0;
+    int m_blocks = (M + SGEMM_MR - 1) / SGEMM_MR;
+    int n_blocks = (N + SGEMM_NR - 1) / SGEMM_NR;
+    long long ops = (long long)M * (long long)N * (long long)K;
+    return (m_blocks * n_blocks >= 4) && (ops >= OMP_MIN_OPS);
+#else
+    (void)M; (void)N; (void)K;
+    return 0;
+#endif
+}
+
 
 void sgemm_nn_packed_a_impl_run(int M, int N, int K,
                                 const float *packed_a,
@@ -271,10 +316,7 @@ void sgemm_nn_packed_a_impl_run(int M, int N, int K,
 {
     if (M <= 0 || N <= 0 || K <= 0) return;
 
-    int use_par = 0;
-#ifdef _OPENMP
-    use_par = allow_parallel && (M >= OMP_MIN_M);
-#endif
+    int use_par = sgemm_should_parallelize(M, N, K, allow_parallel);
 
     float *B_shared = get_bpack_buf((size_t)SGEMM_KC * SGEMM_NC);
     if (!B_shared) return;
@@ -310,7 +352,70 @@ void sgemm_nn_packed_a_impl_run(int M, int N, int K,
                 const float *pb = B_shared + (size_t)nj * ck;
 
                 micro_6x16_packed_a(pa, pb, C + (size_t)m0 * ldc + n0 + nj, ldc,
-                                     ck, cm, cnr, zm);
+                                     ck, cm, cnr, zm, NULL, m0, 0, 0);
+            }
+        }
+    }
+}
+
+void sgemm_nn_packed_a_epilogue(int M, int N, int K,
+                                const float *packed_a,
+                                const float *B, int ldb,
+                                float *C, int ldc,
+                                const float *bias,
+                                int act_type,
+                                int allow_parallel)
+{
+    if (M <= 0 || N <= 0 || K <= 0) return;
+
+    int use_par = sgemm_should_parallelize(M, N, K, allow_parallel);
+
+    float *B_shared = get_bpack_buf((size_t)SGEMM_KC * SGEMM_NC);
+    if (!B_shared) {
+        for (int m = 0; m < M; m++) {
+            for (int n = 0; n < N; n++) {
+                float s = 0.0f;
+                const float *pa = packed_a + (size_t)(m / SGEMM_MR) * K * SGEMM_MR + (m % SGEMM_MR);
+                for (int k = 0; k < K; k++)
+                    s += pa[(size_t)k * SGEMM_MR] * B[(size_t)k * ldb + n];
+                C[(size_t)m * ldc + n] = apply_epilogue_scalar(s, bias, m, act_type);
+            }
+        }
+        return;
+    }
+
+    for (int n0 = 0; n0 < N; n0 += SGEMM_NC) {
+        int cn = SIMD_MIN(SGEMM_NC, N - n0);
+        int num_n_blocks = (cn + SGEMM_NR - 1) / SGEMM_NR;
+
+        for (int k0 = 0; k0 < K; k0 += SGEMM_KC) {
+            int ck = SIMD_MIN(SGEMM_KC, K - k0);
+            int zm = (k0 == 0);
+            int final_k = (k0 + ck == K);
+
+            for (int nj = 0; nj < cn; nj += SGEMM_NR) {
+                int cnr = SIMD_MIN(SGEMM_NR, cn - nj);
+                pack_B_panel(B + (size_t)k0 * ldb + n0 + nj, ldb, ck, cnr,
+                             B_shared + (size_t)nj * ck);
+            }
+
+            int num_m_blocks = (M + SGEMM_MR - 1) / SGEMM_MR;
+            int total_tasks = num_m_blocks * num_n_blocks;
+
+            #pragma omp parallel for schedule(static) if(use_par)
+            for (int task = 0; task < total_tasks; task++) {
+                int mi = task / num_n_blocks;
+                int ni = task % num_n_blocks;
+                int m0 = mi * SGEMM_MR;
+                int nj = ni * SGEMM_NR;
+                int cm = SIMD_MIN(SGEMM_MR, M - m0);
+                int cnr = SIMD_MIN(SGEMM_NR, cn - nj);
+
+                const float *pa = packed_a + (size_t)mi * K * SGEMM_MR + (size_t)k0 * SGEMM_MR;
+                const float *pb = B_shared + (size_t)nj * ck;
+
+                micro_6x16_packed_a(pa, pb, C + (size_t)m0 * ldc + n0 + nj, ldc,
+                                     ck, cm, cnr, zm, bias, m0, act_type, final_k);
             }
         }
     }
@@ -335,10 +440,7 @@ void sgemm_nn(int M, int N, int K,
 {
     if (M <= 0 || N <= 0 || K <= 0) return;
 
-    int use_par = 0;
-#ifdef _OPENMP
-    use_par = (M >= OMP_MIN_M);
-#endif
+    int use_par = sgemm_should_parallelize(M, N, K, 1);
 
     float *B_shared = get_bpack_buf((size_t)SGEMM_KC * SGEMM_NC);
     if (!B_shared) {

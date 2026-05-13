@@ -8,13 +8,15 @@
 #define SGEMM_MR 6
 #define SGEMM_NR 16
 #define SGEMM_KC 256
-#define SGEMM_NC 128
+#define SGEMM_NC 512
 #define OMP_MIN_M 24
 #define PF_AHEAD 8
 
 float *sgemm_pack_a_impl(int M, int K, const float *A, int lda);
+int sgemm_should_parallelize(int M, int N, int K, int allow_parallel);
 void sgemm_nn_packed_a_impl_run(int M, int N, int K, const float *packed_a, const float *B, int ldb, float *C, int ldc, int allow_parallel);
 void sgemm_nn_packed_a(int M, int N, int K, const float *PA, const float *B, int ldb, float *C, int ldc);
+void sgemm_nn_packed_a_epilogue(int M, int N, int K, const float *packed_a, const float *B, int ldb, float *C, int ldc, const float *bias, int act_type, int allow_parallel);
 void sgemm_nn(int M, int N, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc);
 
 #endif /* __AVX2__ */
