@@ -28,6 +28,8 @@ AVAILABLE_PASSES: dict[str, PassFn] = {
     "ConstantFold": transforms.constant_fold,
     "FuseConvBatchNorm": transforms.fuse_conv_batchnorm,
     "FuseConvRelu": transforms.fuse_conv_relu,
+    "FuseConvSilu": transforms.fuse_conv_silu,
+    "FuseAddRelu": transforms.fuse_add_relu,
     "EliminateDead": transforms.eliminate_dead,
 }
 
@@ -36,6 +38,8 @@ DEFAULT_PIPELINE = [
     "ConstantFold",
     "FuseConvBatchNorm",
     "FuseConvRelu",
+    "FuseConvSilu",
+    "FuseAddRelu",
     "EliminateDead",
 ]
 

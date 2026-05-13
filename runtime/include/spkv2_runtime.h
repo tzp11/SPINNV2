@@ -27,6 +27,7 @@ int spkv2_bind_output(Spkv2Context *ctx, int index, void *data, size_t size);
 int spkv2_get_output_size(Spkv2Context *ctx, int index, size_t *out_size);
 int spkv2_get_output(Spkv2Context *ctx, int index, void *data, size_t size);
 int spkv2_run(Spkv2Context *ctx);
+void spkv2_profile_dump(void);
 void spkv2_free(Spkv2Context *ctx);
 
 #ifdef __cplusplus

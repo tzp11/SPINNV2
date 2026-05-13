@@ -147,6 +147,43 @@ def test_m4_cpu_generic_kernel_spec_e2e(tmp_path: Path):
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
 
 
+def test_runtime_uses_graph_output_order(tmp_path: Path):
+    model_path = tmp_path / "multi_output_order.onnx"
+    spk_path = tmp_path / "multi_output_order.spk"
+    input_path = tmp_path / "input.bin"
+    output_path = tmp_path / "output.bin"
+
+    _write_multi_output_order(model_path)
+    subprocess.run(
+        [
+            "python",
+            "-m",
+            "spinnv2.compiler",
+            "compile",
+            str(model_path),
+            "-o",
+            str(spk_path),
+        ],
+        check=True,
+    )
+    debug = json.loads(spk_path.with_suffix(".spk.json").read_text(encoding="utf-8"))
+    graph_outputs = debug["outputs"]
+    assert graph_outputs[0] > graph_outputs[1]
+
+    x = np.array([[-2.0, -0.5, 0.25, 2.0]], dtype=np.float32)
+    input_path.write_bytes(np.ascontiguousarray(x).tobytes())
+
+    runner = Path("build/runtime/spkv2_run")
+    subprocess.run(["cmake", "-S", "runtime", "-B", "build/runtime"], check=True)
+    subprocess.run(["cmake", "--build", "build/runtime"], check=True)
+    subprocess.run([str(runner), str(spk_path), str(input_path), str(output_path)], check=True)
+
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    expected_first = session.run(None, {"input": x})[0].astype(np.float32).reshape(-1)
+    actual = np.frombuffer(output_path.read_bytes(), dtype=np.float32)
+    np.testing.assert_allclose(actual, expected_first, rtol=1e-6, atol=1e-6)
+
+
 def _run_ort(model_path: Path, x: np.ndarray) -> np.ndarray:
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     output = session.run(None, {"input": x})[0]
@@ -192,6 +229,27 @@ def _write_tiny_cnn(path: Path) -> None:
             numpy_helper.from_array(gemm_w, "gemm_w"),
             numpy_helper.from_array(gemm_b, "gemm_b"),
         ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+
+
+def _write_multi_output_order(path: Path) -> None:
+    nodes = [
+        helper.make_node("Relu", ["input"], ["early_output"]),
+        helper.make_node("Sigmoid", ["early_output"], ["late_output"]),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "multi_output_order",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])],
+        [
+            helper.make_tensor_value_info("late_output", TensorProto.FLOAT, [1, 4]),
+            helper.make_tensor_value_info("early_output", TensorProto.FLOAT, [1, 4]),
+        ],
+        [],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 10

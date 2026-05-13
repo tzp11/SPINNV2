@@ -5,7 +5,7 @@
   "alignment": 16,
   "memory": {
     "activation_arena_max": 67108864,
-    "scratch_arena_max": 8388608,
+    "scratch_arena_max": 33554432,
     "allow_runtime_malloc": false
   },
   "features": [
@@ -16,10 +16,12 @@
   ],
   "backends": [
     "ref",
-    "cpu"
+    "cpu",
+    "simd"
   ],
   "ops": {
     "Add": [
+      "simd",
       "ref"
     ],
     "Cast": [
@@ -29,10 +31,15 @@
       "ref"
     ],
     "Conv": [
+      "simd_pointwise_1x1",
+      "simd_depthwise_direct",
+      "simd_winograd_3x3s1",
+      "simd_im2col_gemm",
       "im2col_gemm",
       "ref"
     ],
     "Div": [
+      "simd",
       "ref"
     ],
     "Flatten": [
@@ -42,10 +49,12 @@
       "ref"
     ],
     "Gemm": [
+      "simd_direct",
       "direct",
       "ref"
     ],
     "MatMul": [
+      "simd_direct",
       "ref"
     ],
     "MaxPool": [
@@ -55,15 +64,19 @@
       "ref"
     ],
     "Mul": [
+      "simd",
       "ref"
     ],
     "ReduceMax": [
+      "simd",
       "ref"
     ],
     "ReduceMean": [
+      "simd",
       "ref"
     ],
     "Relu": [
+      "simd",
       "ref"
     ],
     "Reshape": [
@@ -73,15 +86,18 @@
       "ref"
     ],
     "Sigmoid": [
+      "simd",
       "ref"
     ],
     "Softmax": [
+      "simd",
       "ref"
     ],
     "Split": [
       "ref"
     ],
     "Sub": [
+      "simd",
       "ref"
     ],
     "Tile": [
@@ -91,6 +107,7 @@
       "ref"
     ],
     "Transpose": [
+      "simd",
       "ref"
     ],
     "Unsqueeze": [

@@ -13,5 +13,5 @@ cmake-build-*/
 *.exe
 *.spk
 *.spk.json
+*.bak
 memory_plan.csv
-

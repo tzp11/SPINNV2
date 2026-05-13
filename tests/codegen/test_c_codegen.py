@@ -87,7 +87,7 @@ int main(void) {
             str(checksum_test),
             str(gen_dir / "tiny.c"),
             str(build_dir / "spkv2_runtime_build" / "libspkv2_runtime.a"),
-            "-lm",
+            "-lm", "-fopenmp",
             "-o",
             str(build_dir / "checksum_test"),
         ],

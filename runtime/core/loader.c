@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static const Spkv2SectionEntry *find_section(const Spkv2Context *ctx, uint32_t kind) {
     for (uint32_t i = 0; i < ctx->header.section_count; i++) {
@@ -28,6 +29,77 @@ static uint32_t fnv1a32(const uint8_t *data, size_t size) {
         value *= 16777619u;
     }
     return value;
+}
+
+static void skip_json_ws(const char **p, const char *end) {
+    while (*p < end && isspace((unsigned char)**p)) (*p)++;
+}
+
+static const char *find_bytes(const char *begin, const char *end, const char *needle, size_t needle_size) {
+    if (needle_size == 0) return begin;
+    for (const char *p = begin; p + needle_size <= end; p++) {
+        if (memcmp(p, needle, needle_size) == 0) return p;
+    }
+    return NULL;
+}
+
+static int parse_metadata_outputs(Spkv2Context *ctx, const Spkv2SectionEntry *metadata_sec) {
+    if (!metadata_sec || metadata_sec->size == 0 || ctx->header.num_outputs == 0) return 0;
+
+    const char *begin = (const char *)(ctx->model_data + metadata_sec->offset);
+    const char *end = begin + metadata_sec->size;
+    const char *key = "\"outputs\"";
+    const char *p = begin;
+    while (p + strlen(key) <= end) {
+        const char *match = find_bytes(p, end, key, strlen(key));
+        if (!match) return 0;
+        p = match + strlen(key);
+        skip_json_ws(&p, end);
+        if (p >= end || *p != ':') continue;
+        p++;
+        skip_json_ws(&p, end);
+        if (p >= end || *p != '[') continue;
+        p++;
+
+        uint32_t *ids = (uint32_t *)spkv2_platform_calloc(ctx->header.num_outputs, sizeof(uint32_t));
+        if (!ids) return -1;
+        size_t count = 0;
+        for (;;) {
+            skip_json_ws(&p, end);
+            if (p >= end) break;
+            if (*p == ']') {
+                p++;
+                break;
+            }
+            char *next = NULL;
+            unsigned long value = strtoul(p, &next, 10);
+            if (next == p || value >= ctx->header.num_tensors || count >= ctx->header.num_outputs) {
+                spkv2_platform_free(ids);
+                return 0;
+            }
+            ids[count++] = (uint32_t)value;
+            p = next;
+            skip_json_ws(&p, end);
+            if (p < end && *p == ',') {
+                p++;
+                continue;
+            }
+            if (p < end && *p == ']') {
+                p++;
+                break;
+            }
+            spkv2_platform_free(ids);
+            return 0;
+        }
+        if (count == ctx->header.num_outputs) {
+            ctx->output_ids = ids;
+            ctx->output_count = count;
+        } else {
+            spkv2_platform_free(ids);
+        }
+        return 0;
+    }
+    return 0;
 }
 
 int spkv2_load_file(const char *path, Spkv2Context **out_ctx) {
@@ -101,6 +173,7 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
 
     const Spkv2SectionEntry *tensor_sec = find_section(ctx, SPKV2_SECTION_TENSOR_TABLE);
     const Spkv2SectionEntry *node_sec = find_section(ctx, SPKV2_SECTION_NODE_TABLE);
+    const Spkv2SectionEntry *metadata_sec = find_section(ctx, SPKV2_SECTION_METADATA);
     const Spkv2SectionEntry *attr_sec = find_section(ctx, SPKV2_SECTION_ATTRIBUTES);
     const Spkv2SectionEntry *weight_sec = find_section(ctx, SPKV2_SECTION_WEIGHTS);
     const Spkv2SectionEntry *memory_plan_sec = find_section(ctx, SPKV2_SECTION_MEMORY_PLAN);
@@ -156,14 +229,32 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
         ctx->tensors[i].record = &ctx->tensor_records[i];
     }
 
+    int metadata_rc = parse_metadata_outputs(ctx, metadata_sec);
+    if (metadata_rc != 0) {
+        spkv2_platform_free(ctx->tensors);
+        spkv2_platform_free(ctx);
+        return metadata_rc;
+    }
+
+    ctx->node_cache_count = ctx->header.num_nodes;
+    if (ctx->node_cache_count > 0) {
+        ctx->node_cache = (void **)spkv2_platform_calloc(ctx->node_cache_count, sizeof(void *));
+    }
+
     *out_ctx = ctx;
     return 0;
 }
 
 void spkv2_free(Spkv2Context *ctx) {
     if (!ctx) return;
+    if (ctx->node_cache) {
+        for (size_t i = 0; i < ctx->node_cache_count; i++)
+            spkv2_platform_free(ctx->node_cache[i]);
+        spkv2_platform_free(ctx->node_cache);
+    }
     spkv2_platform_free(ctx->owned_scratch);
     spkv2_platform_free(ctx->owned_arena);
+    spkv2_platform_free(ctx->output_ids);
     spkv2_platform_free(ctx->tensors);
     spkv2_platform_free(ctx->owned_model);
     spkv2_platform_free(ctx);

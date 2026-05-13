@@ -31,7 +31,16 @@ DTYPE_CODES = {types.DTYPE_FP32: 1}
 LAYOUT_CODES = {"NCHW": 1}
 WEIGHT_LAYOUT_CODES = {"OIHW": 1}
 BACKEND_CODES = {"ref": 1, "cpu": 2, "simd": 3, "delegate": 4}
-KERNEL_KIND_CODES = {"reference": 1, "direct": 2, "im2col_gemm": 3, "packed_gemm": 4}
+KERNEL_KIND_CODES = {
+    "reference": 1,
+    "direct": 2,
+    "im2col_gemm": 3,
+    "packed_gemm": 4,
+    "pointwise_1x1": 5,
+    "depthwise_direct": 6,
+    "winograd_3x3s1": 7,
+    "conv3x3s2_direct": 8,
+}
 ROLE_CODES = {
     types.ROLE_INPUT: 1,
     types.ROLE_OUTPUT: 2,
@@ -228,7 +237,7 @@ def _attr_bytes(node: Node) -> bytes:
     alpha = float(attrs.get("alpha", 1.0))
     trans_a = int(attrs.get("transA", 0))
     trans_b = int(attrs.get("transB", 0))
-    fused_activation = 1 if attrs.get("fused_activation") == "Relu" else 0
+    fused_activation = {"Relu": 1, "Silu": 2}.get(attrs.get("fused_activation"), 0)
     extra_values: list[int] = []
     if node.op_type == "Transpose":
         extra_values = [int(v) for v in attrs.get("perm", [])]

@@ -143,6 +143,69 @@ def fuse_conv_relu(graph: Graph) -> int:
     return changed
 
 
+def fuse_conv_silu(graph: Graph) -> int:
+    rebuild_graph_links(graph)
+    changed = 0
+    remove_nodes: set[int] = set()
+    for conv in list(graph.nodes):
+        if conv.op_type != "Conv" or not conv.outputs:
+            continue
+        conv_out = conv.outputs[0]
+        consumers = [graph.nodes[node_id] for node_id in graph.tensors[conv_out].consumers]
+        if len(consumers) != 2:
+            continue
+
+        sigmoid = next((node for node in consumers if node.op_type == "Sigmoid"), None)
+        mul = next((node for node in consumers if node.op_type == "Mul"), None)
+        if sigmoid is None or mul is None or not sigmoid.outputs or not mul.outputs:
+            continue
+
+        sigmoid_out = sigmoid.outputs[0]
+        if _active_consumers(graph, sigmoid_out, ignore_node=mul.id) != 0:
+            continue
+        if not ({conv_out, sigmoid_out} <= set(mul.inputs)):
+            continue
+
+        conv.attrs["fused_activation"] = "Silu"
+        conv.outputs[0] = mul.outputs[0]
+        graph.tensors[mul.outputs[0]].producer = conv.id
+        remove_nodes.update({sigmoid.id, mul.id})
+        changed += 1
+
+    if remove_nodes:
+        graph.nodes = [node for node in graph.nodes if node.id not in remove_nodes]
+        _compact_graph(graph)
+    return changed
+
+
+def fuse_add_relu(graph: Graph) -> int:
+    rebuild_graph_links(graph)
+    changed = 0
+    remove_nodes: set[int] = set()
+    for relu in list(graph.nodes):
+        if relu.op_type != "Relu" or not relu.inputs or not relu.outputs:
+            continue
+        add_out = relu.inputs[0]
+        add_node_id = graph.tensors[add_out].producer
+        if add_node_id is None:
+            continue
+        add = graph.nodes[add_node_id]
+        if add.op_type != "Add":
+            continue
+        if _active_consumers(graph, add_out, ignore_node=relu.id) != 0:
+            continue
+        add.attrs["fused_activation"] = "Relu"
+        add.outputs[0] = relu.outputs[0]
+        graph.tensors[relu.outputs[0]].producer = add.id
+        remove_nodes.add(relu.id)
+        changed += 1
+
+    if remove_nodes:
+        graph.nodes = [node for node in graph.nodes if node.id not in remove_nodes]
+        _compact_graph(graph)
+    return changed
+
+
 def eliminate_dead(graph: Graph) -> int:
     rebuild_graph_links(graph)
     live_tensors = set(graph.outputs)

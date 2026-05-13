@@ -98,6 +98,65 @@ def test_fuse_conv_relu_uses_fused_activation_attr():
     assert graph.tensors[graph.nodes[0].outputs[0]].role == types.ROLE_OUTPUT
 
 
+def test_fuse_conv_silu_removes_sigmoid_mul_pair():
+    graph = Graph(model_name="conv_silu")
+    _add_tensor(graph, "input", [1, 1, 2, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "w", [1, 1, 1, 1], types.ROLE_WEIGHT, np.ones((1, 1, 1, 1), dtype=np.float32))
+    _add_tensor(graph, "conv_out", [1, 1, 2, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "sigmoid_out", [1, 1, 2, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "output", [1, 1, 2, 2], types.ROLE_OUTPUT)
+    graph.inputs = [0]
+    graph.outputs = [4]
+    graph.add_node(Node(0, "Conv", [0, 1], [2], {"kernel_shape": [1, 1]}))
+    graph.add_node(Node(1, "Sigmoid", [2], [3]))
+    graph.add_node(Node(2, "Mul", [2, 3], [4]))
+
+    changed = transforms.fuse_conv_silu(graph)
+
+    assert changed == 1
+    assert [node.op_type for node in graph.nodes] == ["Conv"]
+    assert graph.nodes[0].attrs["fused_activation"] == "Silu"
+    assert graph.tensors[graph.nodes[0].outputs[0]].role == types.ROLE_OUTPUT
+
+
+def test_fuse_add_relu_uses_fused_activation_attr():
+    graph = Graph(model_name="add_relu")
+    _add_tensor(graph, "a", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "b", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "add_out", [1, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "output", [1, 2], types.ROLE_OUTPUT)
+    graph.inputs = [0, 1]
+    graph.outputs = [3]
+    graph.add_node(Node(0, "Add", [0, 1], [2]))
+    graph.add_node(Node(1, "Relu", [2], [3]))
+
+    changed = transforms.fuse_add_relu(graph)
+
+    assert changed == 1
+    assert [node.op_type for node in graph.nodes] == ["Add"]
+    assert graph.nodes[0].attrs["fused_activation"] == "Relu"
+    assert graph.tensors[graph.nodes[0].outputs[0]].role == types.ROLE_OUTPUT
+
+
+def test_fuse_add_relu_keeps_multi_consumer_relu():
+    graph = Graph(model_name="add_relu_multi")
+    _add_tensor(graph, "a", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "b", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "add_out", [1, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "relu_out", [1, 2], types.ROLE_OUTPUT)
+    _add_tensor(graph, "other_out", [1, 2], types.ROLE_OUTPUT)
+    graph.inputs = [0, 1]
+    graph.outputs = [3, 4]
+    graph.add_node(Node(0, "Add", [0, 1], [2]))
+    graph.add_node(Node(1, "Relu", [2], [3]))
+    graph.add_node(Node(2, "Mul", [2, 2], [4]))
+
+    changed = transforms.fuse_add_relu(graph)
+
+    assert changed == 0
+    assert [node.op_type for node in graph.nodes] == ["Add", "Relu", "Mul"]
+
+
 def test_eliminate_dead_keeps_only_output_dependencies():
     graph = Graph(model_name="dead_branch")
     _add_tensor(graph, "input", [1, 2], types.ROLE_INPUT)

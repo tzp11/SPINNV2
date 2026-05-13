@@ -30,6 +30,8 @@ typedef struct Spkv2Context {
     size_t attrs_size;
     const uint8_t *weights;
     size_t weights_size;
+    uint32_t *output_ids;
+    size_t output_count;
 
     Spkv2TensorState *tensors;
     uint8_t *owned_arena;
@@ -37,6 +39,9 @@ typedef struct Spkv2Context {
     uint8_t *owned_scratch;
     uint8_t *scratch;
     size_t scratch_size;
+
+    void **node_cache;       /* per-node opaque cache (e.g. packed weights) */
+    size_t node_cache_count;
 } Spkv2Context;
 
 int spkv2_execute_node(Spkv2Context *ctx, const Spkv2NodeRecord *node);
