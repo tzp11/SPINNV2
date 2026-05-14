@@ -12,7 +12,7 @@
 static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                                  float *y_ch, int H, int W,
                                  int kH, int kW, int outH, int outW,
-                                 int pH, int pW)
+                                 int pH, int pW, int act_type)
 {
     for (int oh = 0; oh < outH; oh++) {
         int ow = 0;
@@ -34,7 +34,7 @@ static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                         acc += w_ch[kh * kW + kw] * x_ch[ih * W + iw];
                 }
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
 
         /* Interior: all kernel taps valid → direct AVX2 loadu, no bounds checks */
@@ -50,7 +50,8 @@ static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                     acc = _mm256_fmadd_ps(vw, _mm256_loadu_ps(row + ow + kw - pW), acc);
                 }
             }
-            _mm256_storeu_ps(y_ch + oh * outW + ow, acc);
+            _mm256_storeu_ps(y_ch + oh * outW + ow,
+                             apply_activation_avx2(acc, act_type));
         }
         /* Interior scalar tail */
         for (; ow < ow_end; ow++) {
@@ -62,7 +63,7 @@ static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                 for (int kw = 0; kw < kW; kw++)
                     acc += w_ch[kh * kW + kw] * row[ow + kw - pW];
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
 
         /* Right border (scalar) */
@@ -77,7 +78,103 @@ static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                         acc += w_ch[kh * kW + kw] * x_ch[ih * W + iw];
                 }
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
+        }
+    }
+}
+
+
+
+static void depthwise_conv_s2d1(const float *x_ch, const float *w_ch, float bv,
+                                 float *y_ch, int H, int W,
+                                 int kH, int kW, int outH, int outW,
+                                 int pH, int pW, int act_type)
+{
+    const __m256i gather_idx = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+
+    int oh_start = pH > 0 ? (pH + 1) / 2 : 0;
+    int oh_end   = H >= kH ? (H + pH - kH + 1) / 2 : 0;
+    if (oh_start < 0) oh_start = 0;
+    if (oh_end > outH) oh_end = outH;
+    if (oh_end < oh_start) oh_end = oh_start;
+
+    int ow_start = pW > 0 ? (pW + 1) / 2 : 0;
+    int ow_end   = W >= kW ? (W + pW - kW + 1) / 2 : 0;
+    if (ow_start < 0) ow_start = 0;
+    if (ow_end > outW) ow_end = outW;
+    if (ow_end < ow_start) ow_end = ow_start;
+
+    for (int oh = 0; oh < outH; oh++) {
+        int ow = 0;
+
+        if (oh < oh_start || oh >= oh_end) {
+            for (; ow < outW; ow++) {
+                float acc = bv;
+                for (int kh = 0; kh < kH; kh++) {
+                    int ih = oh * 2 + kh - pH;
+                    if (ih < 0 || ih >= H) continue;
+                    for (int kw = 0; kw < kW; kw++) {
+                        int iw = ow * 2 + kw - pW;
+                        if (iw >= 0 && iw < W)
+                            acc += w_ch[kh * kW + kw] * x_ch[(size_t)ih * W + iw];
+                    }
+                }
+                y_ch[(size_t)oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
+            }
+            continue;
+        }
+
+        for (; ow < ow_start; ow++) {
+            float acc = bv;
+            for (int kh = 0; kh < kH; kh++) {
+                int ih = oh * 2 + kh - pH;
+                const float *row = x_ch + (size_t)ih * W;
+                for (int kw = 0; kw < kW; kw++) {
+                    int iw = ow * 2 + kw - pW;
+                    if (iw >= 0 && iw < W)
+                        acc += w_ch[kh * kW + kw] * row[iw];
+                }
+            }
+            y_ch[(size_t)oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
+        }
+
+        for (; ow + 7 < ow_end; ow += 8) {
+            __m256 acc = _mm256_set1_ps(bv);
+            for (int kh = 0; kh < kH; kh++) {
+                int ih = oh * 2 + kh - pH;
+                const float *row = x_ch + (size_t)ih * W + ow * 2 - pW;
+                for (int kw = 0; kw < kW; kw++) {
+                    __m256 x = _mm256_i32gather_ps(row + kw, gather_idx, 4);
+                    acc = _mm256_fmadd_ps(_mm256_set1_ps(w_ch[kh * kW + kw]), x, acc);
+                }
+            }
+            _mm256_storeu_ps(y_ch + (size_t)oh * outW + ow,
+                             apply_activation_avx2(acc, act_type));
+        }
+
+        for (; ow < ow_end; ow++) {
+            float acc = bv;
+            for (int kh = 0; kh < kH; kh++) {
+                int ih = oh * 2 + kh - pH;
+                const float *row = x_ch + (size_t)ih * W;
+                for (int kw = 0; kw < kW; kw++)
+                    acc += w_ch[kh * kW + kw] * row[ow * 2 + kw - pW];
+            }
+            y_ch[(size_t)oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
+        }
+
+        for (; ow < outW; ow++) {
+            float acc = bv;
+            for (int kh = 0; kh < kH; kh++) {
+                int ih = oh * 2 + kh - pH;
+                const float *row = x_ch + (size_t)ih * W;
+                for (int kw = 0; kw < kW; kw++) {
+                    int iw = ow * 2 + kw - pW;
+                    if (iw >= 0 && iw < W)
+                        acc += w_ch[kh * kW + kw] * row[iw];
+                }
+            }
+            y_ch[(size_t)oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
     }
 }
@@ -88,7 +185,7 @@ static void depthwise_conv_generic(const float *x_ch, const float *w_ch, float b
                                     float *y_ch, int H, int W,
                                     int kH, int kW, int outH, int outW,
                                     int sH, int sW, int pH, int pW,
-                                    int dH, int dW)
+                                    int dH, int dW, int act_type)
 {
     /* Safe interior range: all kernel taps in bounds */
     int oh_start = pH > 0 ? (pH + sH - 1) / sH : 0;
@@ -119,7 +216,7 @@ static void depthwise_conv_generic(const float *x_ch, const float *w_ch, float b
                             acc += w_ch[kh * kW + kw] * x_ch[ih * W + iw];
                     }
                 }
-                y_ch[oh * outW + ow] = acc;
+                y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
             }
             continue;
         }
@@ -136,7 +233,7 @@ static void depthwise_conv_generic(const float *x_ch, const float *w_ch, float b
                         acc += w_ch[kh * kW + kw] * x_ch[ih * W + iw];
                 }
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
 
         /* Interior: no bounds checks needed */
@@ -148,7 +245,7 @@ static void depthwise_conv_generic(const float *x_ch, const float *w_ch, float b
                 for (int kw = 0; kw < kW; kw++)
                     acc += w_ch[kh * kW + kw] * row[ow * sW + kw * dW - pW];
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
 
         /* Right border (scalar) */
@@ -163,7 +260,7 @@ static void depthwise_conv_generic(const float *x_ch, const float *w_ch, float b
                         acc += w_ch[kh * kW + kw] * x_ch[ih * W + iw];
                 }
             }
-            y_ch[oh * outW + ow] = acc;
+            y_ch[oh * outW + ow] = apply_activation_scalar_simd(acc, act_type);
         }
     }
 }
@@ -174,9 +271,10 @@ static void depthwise_conv_simd(const float *x, const float *w, const float *bia
                                 float *y, int C, int H, int W,
                                 int kH, int kW, int outH, int outW,
                                 int sH, int sW, int pH, int pW,
-                                int dH, int dW)
+                                int dH, int dW, int act_type)
 {
     int is_s1d1 = (sH == 1 && sW == 1 && dH == 1 && dW == 1);
+    int is_s2d1 = (sH == 2 && sW == 2 && dH == 1 && dW == 1);
 
     #pragma omp parallel for if(C * outH * outW > 50000) schedule(static)
     for (int c = 0; c < C; c++) {
@@ -187,10 +285,14 @@ static void depthwise_conv_simd(const float *x, const float *w, const float *bia
 
         if (is_s1d1) {
             depthwise_conv_s1d1(x_ch, w_ch, bv, y_ch, H, W,
-                                kH, kW, outH, outW, pH, pW);
+                                kH, kW, outH, outW, pH, pW, act_type);
+        } else if (is_s2d1) {
+            depthwise_conv_s2d1(x_ch, w_ch, bv, y_ch, H, W,
+                                kH, kW, outH, outW, pH, pW, act_type);
         } else {
             depthwise_conv_generic(x_ch, w_ch, bv, y_ch, H, W,
-                                    kH, kW, outH, outW, sH, sW, pH, pW, dH, dW);
+                                    kH, kW, outH, outW, sH, sW, pH, pW, dH, dW,
+                                    act_type);
         }
     }
 }
@@ -327,6 +429,70 @@ static void im2col_3x3_s1p1_tile(const float *im, int C, int H, int W,
                                xc + (size_t)ih * W + (copy0 + kw - 1),
                                (size_t)(copy1 - copy0) * sizeof(float));
                     }
+                    if (ow1 > copy1) {
+                        memset(dst_seg + (copy1 - ow0), 0,
+                               (size_t)(ow1 - copy1) * sizeof(float));
+                    }
+                    done += len;
+                }
+                row++;
+            }
+        }
+    }
+}
+
+
+
+static void im2col_3x3_s2p1_tile(const float *im, int C, int H, int W,
+                                 int outW, int tile_start, int tile_count,
+                                 float *col)
+{
+    const __m256i gather_idx = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    int row = 0;
+    for (int c = 0; c < C; c++) {
+        const float *xc = im + (size_t)c * H * W;
+        for (int kh = 0; kh < 3; kh++) {
+            for (int kw = 0; kw < 3; kw++) {
+                float *dst = col + (size_t)row * tile_count;
+                int done = 0;
+                while (done < tile_count) {
+                    int out_index = tile_start + done;
+                    int oh = out_index / outW;
+                    int ow0 = out_index - oh * outW;
+                    int len = SIMD_MIN(tile_count - done, outW - ow0);
+                    int ih = oh * 2 + kh - 1;
+                    float *dst_seg = dst + done;
+
+                    if (ih < 0 || ih >= H) {
+                        memset(dst_seg, 0, (size_t)len * sizeof(float));
+                        done += len;
+                        continue;
+                    }
+
+                    int ow1 = ow0 + len;
+                    int valid0 = (kw == 0) ? 1 : 0;
+                    int valid1 = (W - kw) / 2 + 1;
+                    if (valid1 > outW) valid1 = outW;
+                    int copy0 = ow0 > valid0 ? ow0 : valid0;
+                    int copy1 = ow1 < valid1 ? ow1 : valid1;
+
+                    if (copy0 > ow0) {
+                        memset(dst_seg, 0, (size_t)(copy0 - ow0) * sizeof(float));
+                    }
+
+                    int copy = copy0;
+                    const float *src = xc + (size_t)ih * W + copy * 2 + kw - 1;
+                    float *dst_copy = dst_seg + (copy0 - ow0);
+                    for (; copy + 7 < copy1; copy += 8) {
+                        __m256 v = _mm256_i32gather_ps(src, gather_idx, 4);
+                        _mm256_storeu_ps(dst_copy, v);
+                        src += 16;
+                        dst_copy += 8;
+                    }
+                    for (; copy < copy1; copy++) {
+                        *dst_copy++ = xc[(size_t)ih * W + copy * 2 + kw - 1];
+                    }
+
                     if (ow1 > copy1) {
                         memset(dst_seg + (copy1 - ow0), 0,
                                (size_t)(ow1 - copy1) * sizeof(float));
@@ -752,9 +918,8 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                                 C_in, H, W, kH, kW, outH, outW,
                                 attr.strides[0], attr.strides[1],
                                 attr.pads[0], attr.pads[1],
-                                attr.dilations[0], attr.dilations[1]);
-            fused_activation_pass(y + (size_t)n * C_out * spatial,
-                                  (size_t)C_out * spatial, attr.fused_activation);
+                                attr.dilations[0], attr.dilations[1],
+                                attr.fused_activation);
         }
         return 0;
     }
@@ -773,6 +938,10 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                              attr.pads[0] == 1 && attr.pads[1] == 1 &&
                              attr.dilations[0] == 1 && attr.dilations[1] == 1 &&
                              outH == H && outW == W);
+    int is_3x3_s2_p1_d1 = (kH == 3 && kW == 3 &&
+                             attr.strides[0] == 2 && attr.strides[1] == 2 &&
+                             attr.pads[0] == 1 && attr.pads[1] == 1 &&
+                             attr.dilations[0] == 1 && attr.dilations[1] == 1);
 
     if (kernel_kind == SPKV2_KERNEL_WINOGRAD_3X3S1) {
         if (group != 1 || !is_3x3_s1_p1_d1) {
@@ -872,6 +1041,9 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
 
                 if (is_3x3_s1_p1_d1) {
                     im2col_3x3_s1p1_tile(x_g, C_in_g, H, W, start, count, col);
+                } else if (is_3x3_s2_p1_d1) {
+                    im2col_3x3_s2p1_tile(x_g, C_in_g, H, W, outW,
+                                         start, count, col);
                 } else {
                     im2col_full_tile(x_g, C_in_g, H, W, kH, kW,
                                      attr.strides[0], attr.strides[1],
