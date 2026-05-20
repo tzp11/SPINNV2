@@ -78,6 +78,30 @@ target_link_libraries(spkv2_prepare_arena_test PRIVATE spkv2_runtime)
 
 add_test(NAME runtime_prepare_arena COMMAND spkv2_prepare_arena_test)
 
+add_executable(spkv2_prepare_conv_cache_test
+    tests/test_prepare_conv_cache.c
+)
+
+target_include_directories(spkv2_prepare_conv_cache_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/core
+)
+
+target_link_libraries(spkv2_prepare_conv_cache_test PRIVATE spkv2_runtime)
+
+add_test(NAME runtime_prepare_conv_cache COMMAND spkv2_prepare_conv_cache_test)
+
+add_executable(spkv2_sgemm_epilogue_test
+    tests/test_sgemm_epilogue.c
+)
+
+target_include_directories(spkv2_sgemm_epilogue_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/optimized
+)
+
+target_link_libraries(spkv2_sgemm_epilogue_test PRIVATE spkv2_runtime m)
+
+add_test(NAME runtime_sgemm_epilogue COMMAND spkv2_sgemm_epilogue_test)
+
 add_executable(spkv2_run
     tools/spkv2_run.c
 )

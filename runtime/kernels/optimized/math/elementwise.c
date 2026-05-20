@@ -55,6 +55,67 @@ int kernel_mul_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratc
     float *y = (float *)ctx->tensors[node->outputs[0]].data;
     size_t n = simd_elem_count(y_rec);
 
+    if (b_rec->rank == 0 && same_shape(a_rec, y_rec)) {
+        float bv = b[0];
+        __m256 vb = _mm256_set1_ps(bv);
+        size_t nb = n & ~(size_t)7;
+        #pragma omp parallel for if(nb >= 65536) schedule(static)
+        for (size_t i = 0; i < nb; i += 8)
+            _mm256_storeu_ps(y + i, _mm256_mul_ps(_mm256_loadu_ps(a + i), vb));
+        for (size_t i = nb; i < n; i++)
+            y[i] = a[i] * bv;
+    } else if (a_rec->rank == 0 && same_shape(b_rec, y_rec)) {
+        float av = a[0];
+        __m256 va = _mm256_set1_ps(av);
+        size_t nb = n & ~(size_t)7;
+        #pragma omp parallel for if(nb >= 65536) schedule(static)
+        for (size_t i = 0; i < nb; i += 8)
+            _mm256_storeu_ps(y + i, _mm256_mul_ps(va, _mm256_loadu_ps(b + i)));
+        for (size_t i = nb; i < n; i++)
+            y[i] = av * b[i];
+    } else if (a_rec->rank == 3 && b_rec->rank == 2 && y_rec->rank == 3 &&
+               a_rec->shape[0] == 1 && b_rec->shape[0] == 1 &&
+               y_rec->shape[0] == 1 &&
+               a_rec->shape[1] == y_rec->shape[1] &&
+               a_rec->shape[2] == y_rec->shape[2] &&
+               b_rec->shape[1] == y_rec->shape[2]) {
+        size_t channels = y_rec->shape[1];
+        size_t width = y_rec->shape[2];
+        size_t nb = width & ~(size_t)7;
+        #pragma omp parallel for if(channels * width >= 65536) schedule(static)
+        for (size_t c = 0; c < channels; c++) {
+            const float *a_ch = a + c * width;
+            float *y_ch = y + c * width;
+            size_t i = 0;
+            for (; i < nb; i += 8)
+                _mm256_storeu_ps(y_ch + i,
+                                 _mm256_mul_ps(_mm256_loadu_ps(a_ch + i),
+                                               _mm256_loadu_ps(b + i)));
+            for (; i < width; i++)
+                y_ch[i] = a_ch[i] * b[i];
+        }
+    } else if (b_rec->rank == 3 && a_rec->rank == 2 && y_rec->rank == 3 &&
+               b_rec->shape[0] == 1 && a_rec->shape[0] == 1 &&
+               y_rec->shape[0] == 1 &&
+               b_rec->shape[1] == y_rec->shape[1] &&
+               b_rec->shape[2] == y_rec->shape[2] &&
+               a_rec->shape[1] == y_rec->shape[2]) {
+        size_t channels = y_rec->shape[1];
+        size_t width = y_rec->shape[2];
+        size_t nb = width & ~(size_t)7;
+        #pragma omp parallel for if(channels * width >= 65536) schedule(static)
+        for (size_t c = 0; c < channels; c++) {
+            const float *b_ch = b + c * width;
+            float *y_ch = y + c * width;
+            size_t i = 0;
+            for (; i < nb; i += 8)
+                _mm256_storeu_ps(y_ch + i,
+                                 _mm256_mul_ps(_mm256_loadu_ps(a + i),
+                                               _mm256_loadu_ps(b_ch + i)));
+            for (; i < width; i++)
+                y_ch[i] = a[i] * b_ch[i];
+        }
+    } else
     if (same_shape(a_rec, y_rec) && same_shape(b_rec, y_rec)) {
         size_t nb = n & ~(size_t)7;
         #pragma omp parallel for if(nb >= 65536) schedule(static)

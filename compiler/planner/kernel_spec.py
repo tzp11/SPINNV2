@@ -31,6 +31,7 @@ SIMD_REF = "simd"
 
 # Max im2col buffer used by the SIMD conv kernel (32 MiB)
 _SIMD_TILE_BYTES = 32 * 1024 * 1024
+_SIMD_IM2COL_TILE_N = 512
 
 DTYPE_FP32 = "fp32"
 LAYOUT_NCHW = "NCHW"
@@ -214,17 +215,19 @@ def _estimate_scratch_bytes(graph: Graph, node: Node, kernel_kind: str, backend:
     w = graph.tensors[node.inputs[1]]
     if len(x.shape) != 4 or len(w.shape) != 4:
         return 0
-    channels = x.shape[1]
+    group = int(node.attrs.get("group", 1))
+    channels = x.shape[1] // max(group, 1)
     kernel_h = w.shape[2]
     kernel_w = w.shape[3]
     K = channels * kernel_h * kernel_w
 
     if backend == BACKEND_SIMD:
-        # SIMD path needs a tile of the full im2col matrix: K × tile_n floats
+        # SIMD path only materializes one im2col tile: K × tile_n floats.
         y = graph.tensors[node.outputs[0]]
         spatial = y.shape[2] * y.shape[3] if len(y.shape) == 4 else 1
-        full_bytes = K * spatial * 4
-        return _align(min(full_bytes, _SIMD_TILE_BYTES), 16)
+        tile_n = min(spatial, _SIMD_IM2COL_TILE_N)
+        tile_bytes = K * tile_n * 4
+        return _align(min(tile_bytes, _SIMD_TILE_BYTES), 16)
 
     # Original CPU im2col: one column vector
     return _align(K * 4, 16)
