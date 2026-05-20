@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import json
 from pathlib import Path
@@ -145,6 +146,49 @@ def test_m4_cpu_generic_kernel_spec_e2e(tmp_path: Path):
     actual = np.frombuffer(output_path.read_bytes(), dtype=np.float32)
     expected = _run_ort(model_path, x).reshape(-1)
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_conv_phase_profile_env_emits_summary(tmp_path: Path):
+    model_path = tmp_path / "tiny_cnn.onnx"
+    spk_path = tmp_path / "tiny_cnn_cpu_generic.spk"
+    input_path = tmp_path / "input.bin"
+    output_path = tmp_path / "output.bin"
+
+    _write_tiny_cnn(model_path)
+    subprocess.run(
+        [
+            "python",
+            "-m",
+            "spinnv2.compiler",
+            "compile",
+            str(model_path),
+            "-o",
+            str(spk_path),
+            "--target",
+            "cpu_generic",
+        ],
+        check=True,
+    )
+
+    x = np.linspace(-1.0, 1.0, num=16, dtype=np.float32).reshape(1, 1, 4, 4)
+    input_path.write_bytes(np.ascontiguousarray(x).tobytes())
+
+    runner = Path("build/runtime/spkv2_run")
+    subprocess.run(["cmake", "-S", "runtime", "-B", "build/runtime"], check=True)
+    subprocess.run(["cmake", "--build", "build/runtime"], check=True)
+    env = {**os.environ, "SPKV2_PROFILE_CONV_PHASES": "1"}
+    proc = subprocess.run(
+        [str(runner), str(spk_path), str(input_path), str(output_path)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "[SPKV2_CONV_PHASE_PROFILE]" in proc.stderr
+    assert "im2col_ms" in proc.stderr
+    assert "sgemm_ms" in proc.stderr
+    assert "epilogue_ms" in proc.stderr
 
 
 def test_runtime_uses_graph_output_order(tmp_path: Path):

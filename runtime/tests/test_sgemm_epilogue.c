@@ -18,6 +18,105 @@ static int close_enough(float a, float b) {
     return d < 1e-5f;
 }
 
+static float relu(float x) {
+    return x > 0.0f ? x : 0.0f;
+}
+
+static int test_edge_m_full_n_epilogue(void) {
+    const int M = 5;
+    const int N = 16;
+    const int K = 3;
+    float A[M * K];
+    float B[K * N];
+    float bias[M];
+    float C[M * N];
+    float expected[M * N];
+
+    for (int i = 0; i < M * K; i++)
+        A[i] = ((float)(i % 7) - 3.0f) * 0.25f;
+    for (int i = 0; i < K * N; i++)
+        B[i] = ((float)(i % 11) - 5.0f) * 0.125f;
+    for (int m = 0; m < M; m++)
+        bias[m] = (float)m * 0.1f - 0.2f;
+    for (int i = 0; i < M * N; i++)
+        C[i] = -999.0f;
+
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            float acc = bias[m];
+            for (int k = 0; k < K; k++)
+                acc += A[m * K + k] * B[k * N + n];
+            expected[m * N + n] = relu(acc);
+        }
+    }
+
+    float *packed_a = sgemm_pack_a_impl(M, K, A, K);
+    if (!packed_a) return 0;
+    sgemm_nn_packed_a_epilogue(M, N, K, packed_a, B, N, C, N, bias, 1, 0);
+    free(packed_a);
+
+    for (int i = 0; i < M * N; i++) {
+        if (!close_enough(C[i], expected[i])) {
+            fprintf(stderr, "edge C[%d]=%.8f expected %.8f\n", i, C[i], expected[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int test_edge_m_tail_n_accumulating_epilogue(void) {
+    const int M = 5;
+    const int N = 9;
+    const int K = 300;
+    float *A = (float *)malloc((size_t)M * K * sizeof(float));
+    float *B = (float *)malloc((size_t)K * N * sizeof(float));
+    float *C = (float *)malloc((size_t)M * N * sizeof(float));
+    float *expected = (float *)malloc((size_t)M * N * sizeof(float));
+    float bias[M];
+    if (!A || !B || !C || !expected) {
+        free(A); free(B); free(C); free(expected);
+        return 0;
+    }
+
+    for (int i = 0; i < M * K; i++)
+        A[i] = ((float)(i % 13) - 6.0f) * 0.03125f;
+    for (int i = 0; i < K * N; i++)
+        B[i] = ((float)(i % 17) - 8.0f) * 0.015625f;
+    for (int m = 0; m < M; m++)
+        bias[m] = (float)m * 0.05f - 0.1f;
+    for (int i = 0; i < M * N; i++)
+        C[i] = -777.0f;
+
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            float acc = bias[m];
+            for (int k = 0; k < K; k++)
+                acc += A[m * K + k] * B[k * N + n];
+            expected[m * N + n] = relu(acc);
+        }
+    }
+
+    float *packed_a = sgemm_pack_a_impl(M, K, A, K);
+    if (!packed_a) {
+        free(A); free(B); free(C); free(expected);
+        return 0;
+    }
+    sgemm_nn_packed_a_epilogue(M, N, K, packed_a, B, N, C, N, bias, 1, 0);
+    free(packed_a);
+
+    int ok = 1;
+    for (int i = 0; i < M * N; i++) {
+        if (!close_enough(C[i], expected[i])) {
+            fprintf(stderr, "tail C[%d]=%.8f expected %.8f\n", i, C[i], expected[i]);
+            ok = 0;
+            break;
+        }
+    }
+
+    free(A); free(B); free(C); free(expected);
+    return ok;
+}
+
 int main(void) {
     const int M = 2;
     const int N = 3;
@@ -51,6 +150,15 @@ int main(void) {
             fprintf(stderr, "C[%d]=%.8f expected %.8f\n", i, C[i], expected[i]);
             return 1;
         }
+    }
+
+    if (!test_edge_m_full_n_epilogue()) {
+        fprintf(stderr, "edge M<MR,N=NR epilogue failed\n");
+        return 1;
+    }
+    if (!test_edge_m_tail_n_accumulating_epilogue()) {
+        fprintf(stderr, "edge M<MR,N<NR accumulating epilogue failed\n");
+        return 1;
     }
 
     if (sgemm_should_parallelize(24, 16, 8, 1) != 0) {

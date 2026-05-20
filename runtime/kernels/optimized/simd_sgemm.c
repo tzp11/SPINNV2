@@ -95,6 +95,15 @@ static inline float apply_epilogue_scalar(float v, const float *bias, int row, i
     return apply_activation_scalar_simd(v, act_type);
 }
 
+static inline __m256i lane_mask_avx2(int lanes)
+{
+    int mask[8] __attribute__((aligned(32))) = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (lanes > 8) lanes = 8;
+    for (int i = 0; i < lanes; i++)
+        mask[i] = -1;
+    return _mm256_load_si256((const __m256i *)mask);
+}
+
 
 static void micro_6x16_packed_a(const float * __restrict__ pa,
                                  const float * __restrict__ pb,
@@ -149,22 +158,57 @@ static void micro_6x16_packed_a(const float * __restrict__ pa,
         pb += SGEMM_NR;
     }
 
-    if (is_edge) {
-        float out_block[SGEMM_MR * SGEMM_NR] __attribute__((aligned(32)));
-        _mm256_storeu_ps(out_block,      c0L); _mm256_storeu_ps(out_block+8,      c0R);
-        _mm256_storeu_ps(out_block+16,   c1L); _mm256_storeu_ps(out_block+16+8,   c1R);
-        _mm256_storeu_ps(out_block+32,   c2L); _mm256_storeu_ps(out_block+32+8,   c2R);
-        _mm256_storeu_ps(out_block+48,   c3L); _mm256_storeu_ps(out_block+48+8,   c3R);
-        _mm256_storeu_ps(out_block+64,   c4L); _mm256_storeu_ps(out_block+64+8,   c4R);
-        _mm256_storeu_ps(out_block+80,   c5L); _mm256_storeu_ps(out_block+80+8,   c5R);
-        for (int m = 0; m < actual_m; m++)
-            for (int n = 0; n < actual_n; n++) {
-                float value = zero_mode ? out_block[m * 16 + n]
-                                        : C[m * ldc + n] + out_block[m * 16 + n];
-                if (final_k)
-                    value = apply_epilogue_scalar(value, bias, bias_row + m, act_type);
-                C[m * ldc + n] = value;
-            }
+    if (is_edge && actual_n == SGEMM_NR) {
+#define STORE_EDGE_FULL_ROW(R, CL, CR) do { \
+        if (actual_m > (R)) { \
+            if (!zero_mode) { \
+                (CL) = _mm256_add_ps(_mm256_loadu_ps(C + (size_t)(R) * ldc), (CL)); \
+                (CR) = _mm256_add_ps(_mm256_loadu_ps(C + (size_t)(R) * ldc + 8), (CR)); \
+            } \
+            if (final_k) { \
+                (CL) = apply_epilogue_vec((CL), bias, bias_row + (R), act_type); \
+                (CR) = apply_epilogue_vec((CR), bias, bias_row + (R), act_type); \
+            } \
+            _mm256_storeu_ps(C + (size_t)(R) * ldc, (CL)); \
+            _mm256_storeu_ps(C + (size_t)(R) * ldc + 8, (CR)); \
+        } \
+    } while (0)
+        STORE_EDGE_FULL_ROW(0, c0L, c0R);
+        STORE_EDGE_FULL_ROW(1, c1L, c1R);
+        STORE_EDGE_FULL_ROW(2, c2L, c2R);
+        STORE_EDGE_FULL_ROW(3, c3L, c3R);
+        STORE_EDGE_FULL_ROW(4, c4L, c4R);
+        STORE_EDGE_FULL_ROW(5, c5L, c5R);
+#undef STORE_EDGE_FULL_ROW
+    } else if (is_edge) {
+        int left_lanes = actual_n < 8 ? actual_n : 8;
+        int right_lanes = actual_n > 8 ? actual_n - 8 : 0;
+        __m256i left_mask = lane_mask_avx2(left_lanes);
+        __m256i right_mask = lane_mask_avx2(right_lanes);
+#define STORE_EDGE_ROW(R, CL, CR) do { \
+        if (actual_m > (R)) { \
+            if (!zero_mode) { \
+                (CL) = _mm256_add_ps(_mm256_maskload_ps(C + (size_t)(R) * ldc, left_mask), (CL)); \
+                if (right_lanes > 0) \
+                    (CR) = _mm256_add_ps(_mm256_maskload_ps(C + (size_t)(R) * ldc + 8, right_mask), (CR)); \
+            } \
+            if (final_k) { \
+                (CL) = apply_epilogue_vec((CL), bias, bias_row + (R), act_type); \
+                if (right_lanes > 0) \
+                    (CR) = apply_epilogue_vec((CR), bias, bias_row + (R), act_type); \
+            } \
+            _mm256_maskstore_ps(C + (size_t)(R) * ldc, left_mask, (CL)); \
+            if (right_lanes > 0) \
+                _mm256_maskstore_ps(C + (size_t)(R) * ldc + 8, right_mask, (CR)); \
+        } \
+    } while (0)
+        STORE_EDGE_ROW(0, c0L, c0R);
+        STORE_EDGE_ROW(1, c1L, c1R);
+        STORE_EDGE_ROW(2, c2L, c2R);
+        STORE_EDGE_ROW(3, c3L, c3R);
+        STORE_EDGE_ROW(4, c4L, c4R);
+        STORE_EDGE_ROW(5, c5L, c5R);
+#undef STORE_EDGE_ROW
     } else {
         if (final_k) {
             c0L = apply_epilogue_vec(c0L, bias, bias_row + 0, act_type);

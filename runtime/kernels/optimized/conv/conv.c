@@ -3,11 +3,93 @@
 
 #ifdef __AVX2__
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+typedef enum {
+    CONV_PHASE_DIRECT = 0,
+    CONV_PHASE_PACK,
+    CONV_PHASE_BIAS,
+    CONV_PHASE_IM2COL,
+    CONV_PHASE_SGEMM,
+    CONV_PHASE_SGEMM_EPILOGUE,
+    CONV_PHASE_EPILOGUE,
+    CONV_PHASE_COUNT
+} ConvPhase;
+
+static int s_conv_phase_profile_enabled = -1;
+static int s_conv_phase_profile_registered = 0;
+static double s_conv_phase_total[CONV_PHASE_COUNT];
+static unsigned long long s_conv_phase_count[CONV_PHASE_COUNT];
+
+static const char *conv_phase_name(ConvPhase phase)
+{
+    switch (phase) {
+    case CONV_PHASE_DIRECT: return "direct_ms";
+    case CONV_PHASE_PACK: return "pack_ms";
+    case CONV_PHASE_BIAS: return "bias_ms";
+    case CONV_PHASE_IM2COL: return "im2col_ms";
+    case CONV_PHASE_SGEMM: return "sgemm_ms";
+    case CONV_PHASE_SGEMM_EPILOGUE: return "sgemm_epilogue_ms";
+    case CONV_PHASE_EPILOGUE: return "epilogue_ms";
+    default: return "unknown_ms";
+    }
+}
+
+static double conv_phase_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+static void conv_phase_profile_dump(void)
+{
+    if (s_conv_phase_profile_enabled <= 0) return;
+
+    unsigned long long total_count = 0;
+    for (int i = 0; i < CONV_PHASE_COUNT; i++)
+        total_count += s_conv_phase_count[i];
+    if (total_count == 0) return;
+
+    fprintf(stderr, "\n[SPKV2_CONV_PHASE_PROFILE]\n");
+    fprintf(stderr, "  %-22s %10s %12s %12s\n", "phase", "count", "total_ms", "avg_ms");
+    for (int i = 0; i < CONV_PHASE_COUNT; i++) {
+        double avg = s_conv_phase_count[i] > 0
+                         ? s_conv_phase_total[i] / (double)s_conv_phase_count[i]
+                         : 0.0;
+        fprintf(stderr, "  %-22s %10llu %12.3f %12.4f\n",
+                conv_phase_name((ConvPhase)i),
+                s_conv_phase_count[i],
+                s_conv_phase_total[i],
+                avg);
+    }
+}
+
+static int conv_phase_profile_enabled(void)
+{
+    if (s_conv_phase_profile_enabled < 0) {
+        const char *v = getenv("SPKV2_PROFILE_CONV_PHASES");
+        s_conv_phase_profile_enabled = (v && v[0] && v[0] != '0') ? 1 : 0;
+        if (s_conv_phase_profile_enabled && !s_conv_phase_profile_registered) {
+            atexit(conv_phase_profile_dump);
+            s_conv_phase_profile_registered = 1;
+        }
+    }
+    return s_conv_phase_profile_enabled;
+}
+
+static void conv_phase_add(ConvPhase phase, double start_ms)
+{
+    if (!conv_phase_profile_enabled()) return;
+    s_conv_phase_total[phase] += conv_phase_now_ms() - start_ms;
+    s_conv_phase_count[phase]++;
+}
 
 static void depthwise_conv_s1d1(const float *x_ch, const float *w_ch, float bv,
                                  float *y_ch, int H, int W,
@@ -908,10 +990,12 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
     int group = attr.group;
     const Spkv2KernelSpecRecord *spec = simd_node_spec(ctx, node);
     uint16_t kernel_kind = spec ? spec->kernel_kind : SPKV2_KERNEL_IM2COL_GEMM;
+    int phase_profile = conv_phase_profile_enabled();
 
     /* ── Depthwise conv: group == C_in == C_out ── */
     if (group == C_in && group == C_out) {
         for (int n = 0; n < N_batch; n++) {
+            double t_direct = phase_profile ? conv_phase_now_ms() : 0.0;
             depthwise_conv_simd(x + (size_t)n * C_in * H * W,
                                 w, bias,
                                 y + (size_t)n * C_out * spatial,
@@ -920,6 +1004,7 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                                 attr.pads[0], attr.pads[1],
                                 attr.dilations[0], attr.dilations[1],
                                 attr.fused_activation);
+            if (phase_profile) conv_phase_add(CONV_PHASE_DIRECT, t_direct);
         }
         return 0;
     }
@@ -947,9 +1032,12 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
         if (group != 1 || !is_3x3_s1_p1_d1) {
             return -99;
         }
-        return winograd_conv3x3s1p1(ctx, node, x, w, bias, y,
-                                    N_batch, C_in, H, W, C_out, outH, outW,
-                                    attr.fused_activation, scratch);
+        double t_direct = phase_profile ? conv_phase_now_ms() : 0.0;
+        int wrc = winograd_conv3x3s1p1(ctx, node, x, w, bias, y,
+                                       N_batch, C_in, H, W, C_out, outH, outW,
+                                       attr.fused_activation, scratch);
+        if (phase_profile) conv_phase_add(CONV_PHASE_DIRECT, t_direct);
+        return wrc;
     }
 
     if (kernel_kind == SPKV2_KERNEL_CONV3X3S2_DIRECT) {
@@ -959,9 +1047,12 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
             attr.dilations[0] != 1 || attr.dilations[1] != 1) {
             return -99;
         }
-        return conv3x3_direct_avx2(x, w, bias, y, N_batch, C_in, H, W,
-                                   C_out, outH, outW, 2,
-                                   attr.fused_activation);
+        double t_direct = phase_profile ? conv_phase_now_ms() : 0.0;
+        int drc = conv3x3_direct_avx2(x, w, bias, y, N_batch, C_in, H, W,
+                                      C_out, outH, outW, 2,
+                                      attr.fused_activation);
+        if (phase_profile) conv_phase_add(CONV_PHASE_DIRECT, t_direct);
+        return drc;
     }
 
     /* ── Lazy weight pre-packing (via node_cache) ── */
@@ -969,7 +1060,9 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
     float *packed_w = NULL;
     if (group == 1 && ctx->node_cache && node->id < ctx->node_cache_count) {
         if (!ctx->node_cache[node->id]) {
+            double t_pack = phase_profile ? conv_phase_now_ms() : 0.0;
             ctx->node_cache[node->id] = sgemm_pack_a_impl(C_out_g, K_g, w, K_g);
+            if (phase_profile) conv_phase_add(CONV_PHASE_PACK, t_pack);
         }
         packed_w = (float *)ctx->node_cache[node->id];
     }
@@ -981,9 +1074,11 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
 
             if (group == 1 && packed_w) {
                 const float *x_n = x + (size_t)n * C_in * H * W;
+                double t_sgemm = phase_profile ? conv_phase_now_ms() : 0.0;
                 sgemm_nn_packed_a_epilogue(C_out, spatial, C_in,
                                            packed_w, x_n, spatial, y_n, spatial,
                                            bias, attr.fused_activation, 1);
+                if (phase_profile) conv_phase_add(CONV_PHASE_SGEMM_EPILOGUE, t_sgemm);
                 continue;
             }
 
@@ -996,18 +1091,25 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                 /* init Y with bias */
                 for (int m = 0; m < C_out_g; m++) {
                     float bv = bias_g ? bias_g[m] : 0.0f;
+                    double t_bias = phase_profile ? conv_phase_now_ms() : 0.0;
                     bias_init_row(y_g + (size_t)m * spatial, bv, spatial);
+                    if (phase_profile) conv_phase_add(CONV_PHASE_BIAS, t_bias);
                 }
 
-                if (packed_w && g == 0)
+                double t_sgemm = phase_profile ? conv_phase_now_ms() : 0.0;
+                if (packed_w && g == 0) {
                     sgemm_nn_packed_a(C_out_g, spatial, C_in_g,
                                        packed_w, x_g, spatial, y_g, spatial);
-                else
+                } else {
                     sgemm_nn(C_out_g, spatial, C_in_g,
                              w_g, C_in_g, x_g, spatial, y_g, spatial);
+                }
+                if (phase_profile) conv_phase_add(CONV_PHASE_SGEMM, t_sgemm);
             }
 
+            double t_epilogue = phase_profile ? conv_phase_now_ms() : 0.0;
             fused_activation_pass(y_n, (size_t)C_out * spatial, attr.fused_activation);
+            if (phase_profile) conv_phase_add(CONV_PHASE_EPILOGUE, t_epilogue);
         }
         return 0;
     }
@@ -1035,10 +1137,13 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                 if (!use_epilogue) {
                     for (int m = 0; m < C_out_g; m++) {
                         float bv = bias_g ? bias_g[m] : 0.0f;
+                        double t_bias = phase_profile ? conv_phase_now_ms() : 0.0;
                         bias_init_row(y_g + (size_t)m * spatial + start, bv, count);
+                        if (phase_profile) conv_phase_add(CONV_PHASE_BIAS, t_bias);
                     }
                 }
 
+                double t_im2col = phase_profile ? conv_phase_now_ms() : 0.0;
                 if (is_3x3_s1_p1_d1) {
                     im2col_3x3_s1p1_tile(x_g, C_in_g, H, W, start, count, col);
                 } else if (is_3x3_s2_p1_d1) {
@@ -1051,23 +1156,31 @@ int kernel_conv_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scrat
                                      attr.dilations[0], attr.dilations[1],
                                      outW, start, count, col);
                 }
+                if (phase_profile) conv_phase_add(CONV_PHASE_IM2COL, t_im2col);
 
                 if (use_epilogue) {
+                    double t_sgemm = phase_profile ? conv_phase_now_ms() : 0.0;
                     sgemm_nn_packed_a_epilogue(C_out_g, count, K_g,
                                                packed_w, col, count,
                                                y_g + start, spatial,
                                                bias_g, attr.fused_activation, 1);
+                    if (phase_profile) conv_phase_add(CONV_PHASE_SGEMM_EPILOGUE, t_sgemm);
                 } else {
+                    double t_sgemm = phase_profile ? conv_phase_now_ms() : 0.0;
                     sgemm_nn(C_out_g, count, K_g,
                              w_g, K_g, col, count,
                              y_g + start, spatial);
+                    if (phase_profile) conv_phase_add(CONV_PHASE_SGEMM, t_sgemm);
                 }
             }
         }
 
         /* fused activation */
-        if (!use_epilogue)
+        if (!use_epilogue) {
+            double t_epilogue = phase_profile ? conv_phase_now_ms() : 0.0;
             fused_activation_pass(y_n, (size_t)C_out * spatial, attr.fused_activation);
+            if (phase_profile) conv_phase_add(CONV_PHASE_EPILOGUE, t_epilogue);
+        }
     }
     return 0;
 }
