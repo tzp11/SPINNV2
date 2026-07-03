@@ -30,6 +30,9 @@ AVAILABLE_PASSES: dict[str, PassFn] = {
     "FuseConvRelu": transforms.fuse_conv_relu,
     "FuseConvSilu": transforms.fuse_conv_silu,
     "FuseAddRelu": transforms.fuse_add_relu,
+    "FuseConvAdd": transforms.fuse_conv_add,
+    "EliminateNoopTranspose": transforms.eliminate_noop_transpose,
+    "ShareConstants": transforms.share_constants,
     "EliminateDead": transforms.eliminate_dead,
 }
 
@@ -40,12 +43,60 @@ DEFAULT_PIPELINE = [
     "FuseConvRelu",
     "FuseConvSilu",
     "FuseAddRelu",
+    "FuseConvAdd",
+    "EliminateNoopTranspose",
+    "ShareConstants",
     "EliminateDead",
 ]
 
+OPTIMIZATION_LEVELS: dict[int, list[str]] = {
+    0: [],
+    1: [
+        "EliminateIdentityDropout",
+        "ConstantFold",
+        "FuseConvBatchNorm",
+        "EliminateDead",
+    ],
+    2: list(DEFAULT_PIPELINE),
+}
 
-def run_default_pass_pipeline(graph: Graph, *, enabled: bool = True) -> list[PassResult]:
-    return run_pass_pipeline(graph, enabled=enabled)
+
+def pipeline_for_level(level: int) -> list[str]:
+    """Return the pass pipeline for a given optimization level (0, 1, or 2)."""
+    if level not in OPTIMIZATION_LEVELS:
+        raise ValueError(f"unknown optimization level: {level}, expected 0, 1, or 2")
+    return list(OPTIMIZATION_LEVELS[level])
+
+# Passes that require specific backends in the target profile.
+# If a pass is listed here, it only runs when the target profile
+# has at least one of the required backends.
+PASS_REQUIRED_BACKENDS: dict[str, set[str]] = {
+    "FuseConvAdd": {"simd", "cpu"},
+}
+
+
+def pipeline_for_target(
+    profile: dict | None = None,
+    pipeline: list[str] | None = None,
+) -> list[str]:
+    base = pipeline or DEFAULT_PIPELINE
+    if profile is None:
+        return base
+    backends = set(profile.get("backends", []))
+    return [
+        name for name in base
+        if name not in PASS_REQUIRED_BACKENDS
+        or PASS_REQUIRED_BACKENDS[name] & backends
+    ]
+
+
+def run_default_pass_pipeline(
+    graph: Graph,
+    *,
+    enabled: bool = True,
+    profile: dict | None = None,
+) -> list[PassResult]:
+    return run_pass_pipeline(graph, enabled=enabled, profile=profile)
 
 
 def run_pass_pipeline(
@@ -53,12 +104,13 @@ def run_pass_pipeline(
     *,
     pipeline: list[str] | None = None,
     enabled: bool = True,
+    profile: dict | None = None,
 ) -> list[PassResult]:
     if not enabled:
         graph.metadata["pass_stats"] = []
         return []
 
-    pass_names = pipeline or DEFAULT_PIPELINE
+    pass_names = pipeline_for_target(profile, pipeline)
 
     results: list[PassResult] = []
     for name in pass_names:

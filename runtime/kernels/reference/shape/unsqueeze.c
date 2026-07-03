@@ -2,10 +2,12 @@
 
 int kernel_unsqueeze(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch) {
     (void)scratch;
-    const Spkv2TensorRecord *x_rec = ctx->tensors[node->inputs[0]].record;
-    const Spkv2TensorRecord *y_rec = ctx->tensors[node->outputs[0]].record;
     const float *x = (const float *)ctx->tensors[node->inputs[0]].data;
     float *y = (float *)ctx->tensors[node->outputs[0]].data;
+    if (x == y)
+        return 0;
+    const Spkv2TensorRecord *x_rec = ctx->tensors[node->inputs[0]].record;
+    const Spkv2TensorRecord *y_rec = ctx->tensors[node->outputs[0]].record;
     int axes[8] = {0};
     int axis_count = 0;
     Spkv2AttrRecord attr;

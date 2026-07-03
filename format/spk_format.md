@@ -18,7 +18,7 @@ Required header fields:
 | Field | Meaning |
 |---|---|
 | `magic` | `SPKV2_MAGIC` |
-| `version_major/minor` | Format version. Current binary writer emits `0.2`. |
+| `version_major/minor` | Format version. Current binary writer emits `0.3`. |
 | `endianness` | Encoded byte order |
 | `section_count` | Number of section directory entries |
 | `num_tensors` | Tensor count |
@@ -47,6 +47,7 @@ Initial section IDs:
 | 10 | String Table |
 | 11 | Debug |
 | 12 | Checksum |
+| 13 | Protection Plan |
 
 ## Validation Rules
 
@@ -261,3 +262,55 @@ CMakeLists.txt
 Generated `model.c` owns static activation and scratch arenas, then calls
 `spkv2_prepare_with_scratch` and binds caller-provided input/output buffers via
 `spkv2_bind_input` and `spkv2_bind_output`.
+
+## M6 SPK 0.3
+
+M6 bumps the format version to 0.3 with the following changes:
+
+- **WEIGHTS section 4KB alignment**: The Weights section is now aligned to 4096
+  bytes (one page), enabling direct `mmap` and DMA access on embedded platforms.
+  Previous versions used 16-byte alignment.
+
+- **Multi-I/O codegen**: Generated C wrappers now emit per-index size macros
+  (`MODEL_INPUT_SIZE_0`, `MODEL_OUTPUT_SIZE_1`, etc.) and a `run_multi` API for
+  models with multiple inputs or outputs. The single-I/O `run`/`run_checked` APIs
+  remain for backward compatibility.
+
+The runtime loader checks only `version_major`, so 0.3 SPK files are loadable by
+runtimes that accept version 0.x without code changes.
+
+## Protection Plan
+
+The Protection Plan section (ID 13) embeds a per-node reliability protection
+configuration compiled from an external JSON plan.
+
+The C definition is `Spkv2ProtectionRecord` in `runtime/include/spkv2_format.h`.
+
+Protection records include:
+
+```text
+node_id         uint32   Target node ID
+tensor_id       uint32   Output tensor to protect
+mode            uint16   Protection mode (see below)
+flags           uint16   Reserved
+lower_bound     float32  Range guard lower bound (mode 1)
+upper_bound     float32  Range guard upper bound (mode 1)
+scratch_offset  uint64   Offset into scratch arena for DMR buffers
+```
+
+Protection modes:
+
+| Code | Mode | Behavior |
+|------|------|----------|
+| 0 | `SPKV2_PROTECT_NONE` | No protection |
+| 1 | `SPKV2_PROTECT_RANGE_GUARD_RERUN` | Check output range; re-execute if out of bounds |
+| 2 | `SPKV2_PROTECT_DMR_COMPARE_RERUN` | Execute twice, compare; re-execute on mismatch |
+
+The compiler computes the required DMR scratch as `2 * max_protected_tensor_bytes`
+and adds it to `header.scratch_arena_bytes`. DMR buffers are shared across nodes
+because protected nodes execute sequentially.
+
+The Protection Plan section is optional. When absent, all nodes execute without
+protection. When present, the runtime dispatches each node through
+`execute_protected_node()` which looks up the protection record and applies the
+specified mechanism.

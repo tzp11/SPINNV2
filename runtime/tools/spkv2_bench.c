@@ -11,6 +11,7 @@
  */
 
 #include "spkv2_runtime.h"
+#include "spkv2_platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +68,7 @@ int main(int argc, char **argv) {
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) warmup = atoi(argv[++i]);
         else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc) runs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) spkv2_set_num_threads(atoi(argv[++i]));
     }
 
     Spkv2Context *ctx = NULL;
@@ -148,6 +150,7 @@ int main(int argc, char **argv) {
     printf("  \"prepare_ms\": %.4f,\n", t_prep);
     printf("  \"warmup\": %d,\n", warmup);
     printf("  \"runs\": %d,\n", runs);
+    printf("  \"threads\": %d,\n", spkv2_get_num_threads());
     printf("  \"min_ms\": %.4f,\n", mn);
     printf("  \"avg_ms\": %.4f,\n", sum / runs);
     printf("  \"p50_ms\": %.4f,\n", p50);

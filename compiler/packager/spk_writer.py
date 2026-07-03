@@ -10,11 +10,12 @@ from compiler.ir.graph import Graph, Node, Tensor
 from compiler.ir import types
 from compiler.planner.kernel_spec import KernelPlan, KernelSpec, select_kernel_specs
 from compiler.planner.memory_plan import MemoryPlan, plan_memory, write_memory_plan_csv
+from compiler.reliability.protection_plan import ProtectionPlan
 
 
 SPKV2_MAGIC = 0x32564B50
 VERSION_MAJOR = 0
-VERSION_MINOR = 2
+VERSION_MINOR = 3
 
 SECTION_METADATA = 1
 SECTION_TARGET_PROFILE = 2
@@ -25,9 +26,11 @@ SECTION_WEIGHTS = 6
 SECTION_MEMORY_PLAN = 7
 SECTION_KERNEL_SPEC = 8
 SECTION_STRING_TABLE = 10
+SECTION_QUANTIZATION = 9
 SECTION_CHECKSUM = 12
+SECTION_PROTECTION_PLAN = 13
 
-DTYPE_CODES = {types.DTYPE_FP32: 1}
+DTYPE_CODES = {types.DTYPE_FP32: 1, types.DTYPE_INT8: 2, types.DTYPE_FP16: 3}
 LAYOUT_CODES = {"NCHW": 1}
 WEIGHT_LAYOUT_CODES = {"OIHW": 1}
 BACKEND_CODES = {"ref": 1, "cpu": 2, "simd": 3, "delegate": 4}
@@ -40,6 +43,9 @@ KERNEL_KIND_CODES = {
     "depthwise_direct": 6,
     "winograd_3x3s1": 7,
     "conv3x3s2_direct": 8,
+    "winograd_f43": 9,
+    "int8_im2col_gemm": 10,
+    "bnns_fp32": 11,
 }
 ROLE_CODES = {
     types.ROLE_INPUT: 1,
@@ -82,15 +88,22 @@ OP_CODES = {
     "GatherElements": 23,
     "TopK": 24,
     "Cast": 25,
+    "Slice": 26,
+    "Gather": 27,
+    "AveragePool": 28,
+    "GlobalAveragePool": 29,
+    "Clip": 30,
+    "LeakyRelu": 31,
 }
 
 HEADER_STRUCT = struct.Struct("<IHHHHIIIIIIQQQII")
 SECTION_STRUCT = struct.Struct("<IIQQII")
 TENSOR_STRUCT = struct.Struct("<IHHHH8IQQII")
 NODE_STRUCT = struct.Struct("<IHHHH8I4IIIII")
-ATTR_STRUCT = struct.Struct("<Iiii4i2i2i2i2ifii8i4i")
+ATTR_STRUCT = struct.Struct("<Iiii4i2i2i2i2i2fii8i3i")
 MEMORY_PLAN_STRUCT = struct.Struct("<IHHIQQII")
 KERNEL_SPEC_STRUCT = struct.Struct("<IIHHHHHHQQII")
+QUANT_PARAM_STRUCT = struct.Struct("<IHHI Q")  # tensor_id(u32), scheme(u16), quant_axis(u16), num_channels(u32), data_offset(u64)
 
 
 def write_spk(
@@ -101,6 +114,8 @@ def write_spk(
     memory_plan: MemoryPlan | None = None,
     kernel_plan: KernelPlan | None = None,
     memory_plan_csv: str | Path | None = None,
+    quant_params: list | None = None,
+    protection_plan: ProtectionPlan | None = None,
 ) -> None:
     out_path = Path(out_path)
     _validate_runtime_ops(graph)
@@ -124,9 +139,15 @@ def write_spk(
     sections.append((SECTION_TENSOR_TABLE, _tensor_table_bytes(graph, strings.offsets, weight_offsets, memory_plan), 4))
     sections.append((SECTION_NODE_TABLE, _node_table_bytes(graph, attr_offsets, kernel_plan), 4))
     sections.append((SECTION_ATTRIBUTES, attrs, 4))
-    sections.append((SECTION_WEIGHTS, weights, 16))
+    sections.append((SECTION_WEIGHTS, weights, 4096))
     sections.append((SECTION_MEMORY_PLAN, _memory_plan_bytes(graph, memory_plan), 4))
     sections.append((SECTION_KERNEL_SPEC, _kernel_spec_bytes(kernel_plan.specs), 4))
+    if quant_params:
+        sections.append((SECTION_QUANTIZATION, _quantization_section_bytes(quant_params), 4))
+    if protection_plan is not None:
+        protection_plan.validated_for_graph(graph)
+        prot_blob = protection_plan.to_bytes(graph, scratch_offset=kernel_plan.scratch_arena_bytes)
+        sections.append((SECTION_PROTECTION_PLAN, prot_blob, 8))
     sections.append((SECTION_STRING_TABLE, strings.blob, 1))
     sections.append((SECTION_CHECKSUM, b"\x00\x00\x00\x00", 4))
 
@@ -163,7 +184,7 @@ def write_spk(
         len(graph.outputs),
         sum(t.size_bytes for t in graph.tensors if t.role == types.ROLE_WEIGHT),
         memory_plan.planned_activation_bytes,
-        kernel_plan.scratch_arena_bytes,
+        kernel_plan.scratch_arena_bytes + (protection_plan.scratch_bytes(graph) if protection_plan else 0),
         _stable_profile_hash(target_profile),
         1,
     )
@@ -235,6 +256,7 @@ def _attr_bytes(node: Node) -> bytes:
     dilations = _int_list(attrs.get("dilations", [1, 1]), 2, 1)
     group = int(attrs.get("group", 1))
     alpha = float(attrs.get("alpha", 1.0))
+    beta = float(attrs.get("beta", 1.0))
     trans_a = int(attrs.get("transA", 0))
     trans_b = int(attrs.get("transB", 0))
     fused_activation = {"Relu": 1, "Silu": 2}.get(attrs.get("fused_activation"), 0)
@@ -266,13 +288,13 @@ def _attr_bytes(node: Node) -> bytes:
         trans_a,
         trans_b,
         alpha,
+        beta,
         len(extra_values),
         keepdims,
         *extra,
         largest,
         sorted_attr,
         cast_to,
-        0,
     )
 
 
@@ -463,4 +485,43 @@ def _feature_mask(features: list[str]) -> int:
     mask = 0
     if types.DTYPE_FP32 in features:
         mask |= 1
+    if types.DTYPE_INT8 in features:
+        mask |= 2
+    if types.DTYPE_FP16 in features:
+        mask |= 4
     return mask
+
+
+_QUANT_SCHEME_CODES = {"per_tensor": 1, "per_channel": 2}
+
+
+def _quantization_section_bytes(quant_params: list) -> bytes:
+    """Serialize SECTION_QUANTIZATION: array of Spkv2QuantParamRecord
+    followed by scale/zero_point float arrays."""
+    import struct as _struct
+
+    record_count = len(quant_params)
+    records_size = record_count * QUANT_PARAM_STRUCT.size
+
+    data_blob = bytearray()
+    data_offsets: list[int] = []
+
+    for qp in quant_params:
+        offset = records_size + len(data_blob)
+        data_offsets.append(offset)
+        for s in qp.scales:
+            data_blob.extend(_struct.pack("<f", s))
+        for zp in qp.zero_points:
+            data_blob.extend(_struct.pack("<i", zp))
+
+    records = bytearray()
+    for i, qp in enumerate(quant_params):
+        records.extend(QUANT_PARAM_STRUCT.pack(
+            qp.tensor_id,
+            _QUANT_SCHEME_CODES.get(qp.scheme, 0),
+            qp.quant_axis,
+            qp.num_channels,
+            data_offsets[i],
+        ))
+
+    return bytes(records + data_blob)

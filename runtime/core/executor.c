@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 
 /* --- Per-op profiling (env SPKV2_PROFILE=1) --- */
 #define SPKV2_PROF_MAX_OPS 64
@@ -45,6 +46,8 @@ static const char *op_name(uint16_t op) {
         case SPKV2_OP_REDUCEMEAN: return "ReduceMean";
         case SPKV2_OP_CAST: return "Cast";
         case SPKV2_OP_MOD: return "Mod";
+        case SPKV2_OP_SLICE: return "Slice";
+        case SPKV2_OP_GATHER: return "Gather";
         default: return "Unknown";
     }
 }
@@ -65,6 +68,9 @@ static const char *kernel_kind_name(uint16_t kind) {
         case SPKV2_KERNEL_DEPTHWISE_DIRECT: return "depthwise_direct";
         case SPKV2_KERNEL_WINOGRAD_3X3S1: return "winograd_3x3s1";
         case SPKV2_KERNEL_CONV3X3S2_DIRECT: return "conv3x3s2_direct";
+        case SPKV2_KERNEL_WINOGRAD_F43: return "winograd_f43";
+        case SPKV2_KERNEL_INT8_IM2COL_GEMM: return "int8_im2col_gemm";
+        case SPKV2_KERNEL_BNNS_FP32: return "bnns_fp32";
         default: return "unknown";
     }
 }
@@ -160,6 +166,20 @@ static void prof_dump(const Spkv2Context *ctx) {
                 s_prof_node_total[i],
                 node->scratch_bytes);
     }
+
+    fprintf(stderr, "\nnode_id,op_type,avg_ms,total_ms,count\n");
+    for (uint32_t i = 0; i < ctx->header.num_nodes && i < SPKV2_PROF_MAX_NODES; i++) {
+        if (s_prof_node_count[i] == 0) continue;
+        const Spkv2NodeRecord *node = &ctx->node_records[i];
+        int runs = s_prof_runs > 0 ? s_prof_runs : 1;
+        fprintf(stderr, "%u,%s,%.9f,%.9f,%d\n",
+                node->id,
+                op_name(node->op_type),
+                s_prof_node_total[i] / (double)s_prof_node_count[i],
+                s_prof_node_total[i],
+                s_prof_node_count[i] / runs);
+    }
+    fprintf(stderr, "\n");
 }
 
 static uint64_t align16(uint64_t value) {
@@ -312,10 +332,178 @@ int spkv2_get_output_size(Spkv2Context *ctx, int index, size_t *out_size) {
     return 0;
 }
 
+int spkv2_set_fault_event(Spkv2Context *ctx, const Spkv2FaultEvent *event) {
+    if (!ctx || !event || event->bit_index >= 32u) return -1;
+    if (event->node_id >= ctx->header.num_nodes || event->tensor_id >= ctx->header.num_tensors) return -2;
+    ctx->fault_event = *event;
+    return 0;
+}
+
+void spkv2_clear_fault_event(Spkv2Context *ctx) {
+    if (!ctx) return;
+    memset(&ctx->fault_event, 0, sizeof(ctx->fault_event));
+}
+
+int spkv2_get_reliability_stats(Spkv2Context *ctx, Spkv2ReliabilityStats *stats) {
+    if (!ctx || !stats) return -1;
+    *stats = ctx->reliability_stats;
+    return 0;
+}
+
+void spkv2_reset_reliability_stats(Spkv2Context *ctx) {
+    if (!ctx) return;
+    memset(&ctx->reliability_stats, 0, sizeof(ctx->reliability_stats));
+}
+
+int spkv2_get_range_observation(Spkv2Context *ctx, uint32_t node_id, Spkv2RangeObservation *observation) {
+    if (!ctx || !observation || node_id >= ctx->node_cache_count || !ctx->range_observations) return -1;
+    *observation = ctx->range_observations[node_id];
+    return 0;
+}
+
+void spkv2_reset_range_observations(Spkv2Context *ctx) {
+    if (!ctx || !ctx->range_observations) return;
+    memset(ctx->range_observations, 0, ctx->node_cache_count * sizeof(Spkv2RangeObservation));
+}
+
+static const Spkv2ProtectionRecord *protection_for_node(const Spkv2Context *ctx, uint32_t node_id) {
+    for (size_t i = 0; i < ctx->protection_count; i++) {
+        if (ctx->protection_records[i].node_id == node_id)
+            return &ctx->protection_records[i];
+    }
+    return NULL;
+}
+
+static int maybe_inject_fault(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+    if (!ctx->fault_event.enabled || node->id != ctx->fault_event.node_id) return 0;
+    if (node->id >= ctx->node_cache_count || !ctx->node_invocation_counts) return -20;
+    ctx->node_invocation_counts[node->id]++;
+    if (ctx->node_invocation_counts[node->id] != ctx->fault_event.invocation_index) return 0;
+    if (ctx->fault_event.tensor_id >= ctx->header.num_tensors) return -21;
+    const Spkv2TensorRecord *tensor = &ctx->tensor_records[ctx->fault_event.tensor_id];
+    int output_matches = 0;
+    for (uint16_t i = 0; i < node->output_count; i++) {
+        if (node->outputs[i] == ctx->fault_event.tensor_id) output_matches = 1;
+    }
+    if (!output_matches || tensor->dtype != SPKV2_DTYPE_FP32) return -22;
+    if (ctx->fault_event.element_index >= tensor->size_bytes / sizeof(uint32_t)) return -23;
+    uint8_t *address = ctx->tensors[ctx->fault_event.tensor_id].data
+        + ctx->fault_event.element_index * sizeof(uint32_t);
+    uint32_t bits = 0;
+    memcpy(&bits, address, sizeof(bits));
+    bits ^= (uint32_t)1u << ctx->fault_event.bit_index;
+    memcpy(address, &bits, sizeof(bits));
+    ctx->reliability_stats.injected_faults++;
+    return 0;
+}
+
+static int execute_once(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+    int rc = spkv2_execute_node(ctx, node);
+    if (rc != 0) return rc;
+    return maybe_inject_fault(ctx, node);
+}
+
+static int output_in_range(const Spkv2Context *ctx, const Spkv2ProtectionRecord *record) {
+    if (record->tensor_id >= ctx->header.num_tensors) return 0;
+    const Spkv2TensorRecord *tensor = &ctx->tensor_records[record->tensor_id];
+    const float *values = (const float *)ctx->tensors[record->tensor_id].data;
+    size_t count = (size_t)(tensor->size_bytes / sizeof(float));
+    for (size_t i = 0; i < count; i++) {
+        if (!isfinite(values[i]) || values[i] < record->lower_bound || values[i] > record->upper_bound)
+            return 0;
+    }
+    return 1;
+}
+
+static void record_output_range(Spkv2Context *ctx, const Spkv2ProtectionRecord *record) {
+    if (!ctx->range_observations || record->node_id >= ctx->node_cache_count ||
+        record->tensor_id >= ctx->header.num_tensors)
+        return;
+    const Spkv2TensorRecord *tensor = &ctx->tensor_records[record->tensor_id];
+    const float *values = (const float *)ctx->tensors[record->tensor_id].data;
+    size_t count = (size_t)(tensor->size_bytes / sizeof(float));
+    if (count == 0) return;
+    float minimum = values[0];
+    float maximum = values[0];
+    for (size_t i = 1; i < count; i++) {
+        if (values[i] < minimum) minimum = values[i];
+        if (values[i] > maximum) maximum = values[i];
+    }
+    Spkv2RangeObservation *observation = &ctx->range_observations[record->node_id];
+    observation->node_id = record->node_id;
+    observation->tensor_id = record->tensor_id;
+    if (observation->observations == 0) {
+        observation->observed_min = minimum;
+        observation->observed_max = maximum;
+    } else {
+        if (minimum < observation->observed_min) observation->observed_min = minimum;
+        if (maximum > observation->observed_max) observation->observed_max = maximum;
+    }
+    observation->observations++;
+}
+
+static int execute_protected_node(Spkv2Context *ctx, const Spkv2NodeRecord *node) {
+    const Spkv2ProtectionRecord *record = protection_for_node(ctx, node->id);
+    if (!record || record->mode == SPKV2_PROTECT_NONE) return execute_once(ctx, node);
+    if (record->tensor_id >= ctx->header.num_tensors || node->output_count != 1 ||
+        node->outputs[0] != record->tensor_id)
+        return -24;
+
+    if (record->mode == SPKV2_PROTECT_RANGE_GUARD_RERUN) {
+        int rc = execute_once(ctx, node);
+        if (rc == 0) record_output_range(ctx, record);
+        if (rc != 0 || output_in_range(ctx, record)) return rc;
+        ctx->reliability_stats.detected_faults++;
+        ctx->reliability_stats.rerun_count++;
+        rc = execute_once(ctx, node);
+        if (rc != 0) return rc;
+        if (output_in_range(ctx, record))
+            ctx->reliability_stats.recovered_faults++;
+        else
+            ctx->reliability_stats.unrecovered_faults++;
+        return 0;
+    }
+
+    if (record->mode == SPKV2_PROTECT_DMR_COMPARE_RERUN) {
+        const Spkv2TensorRecord *tensor = &ctx->tensor_records[record->tensor_id];
+        size_t bytes = (size_t)tensor->size_bytes;
+        if (!ctx->scratch || record->scratch_offset > ctx->scratch_size ||
+            bytes * 2u > ctx->scratch_size - (size_t)record->scratch_offset)
+            return -25;
+        uint8_t *first = ctx->scratch + (size_t)record->scratch_offset;
+        uint8_t *second = first + bytes;
+        int rc = execute_once(ctx, node);
+        if (rc != 0) return rc;
+        memcpy(first, ctx->tensors[record->tensor_id].data, bytes);
+        rc = execute_once(ctx, node);
+        if (rc != 0) return rc;
+        memcpy(second, ctx->tensors[record->tensor_id].data, bytes);
+        if (memcmp(first, second, bytes) == 0) return 0;
+        ctx->reliability_stats.detected_faults++;
+        ctx->reliability_stats.rerun_count++;
+        rc = execute_once(ctx, node);
+        if (rc != 0) return rc;
+        if (memcmp(first, ctx->tensors[record->tensor_id].data, bytes) == 0) {
+            memcpy(ctx->tensors[record->tensor_id].data, first, bytes);
+            ctx->reliability_stats.recovered_faults++;
+        } else if (memcmp(second, ctx->tensors[record->tensor_id].data, bytes) == 0) {
+            memcpy(ctx->tensors[record->tensor_id].data, second, bytes);
+            ctx->reliability_stats.recovered_faults++;
+        } else {
+            ctx->reliability_stats.unrecovered_faults++;
+        }
+        return 0;
+    }
+    return -26;
+}
+
 int spkv2_run(Spkv2Context *ctx) {
     if (!ctx) return -1;
     prof_init();
     s_prof_last_ctx = ctx;
+    if (ctx->node_invocation_counts) {
+        memset(ctx->node_invocation_counts, 0, ctx->node_cache_count * sizeof(uint32_t));
+    }
     for (uint32_t i = 0; i < ctx->header.num_tensors; i++) {
         const Spkv2TensorRecord *record = &ctx->tensor_records[i];
         if (record->role != SPKV2_ROLE_WEIGHT && ctx->tensors[i].data == NULL) {
@@ -326,7 +514,7 @@ int spkv2_run(Spkv2Context *ctx) {
         for (uint32_t i = 0; i < ctx->header.num_nodes; i++) {
             const Spkv2NodeRecord *nd = &ctx->node_records[i];
             double t0 = prof_now_ms();
-            int rc = spkv2_execute_node(ctx, nd);
+            int rc = execute_protected_node(ctx, nd);
             double dt = prof_now_ms() - t0;
             if (nd->op_type < SPKV2_PROF_MAX_OPS) {
                 s_prof_total[nd->op_type] += dt;
@@ -341,7 +529,7 @@ int spkv2_run(Spkv2Context *ctx) {
         s_prof_runs++;
     } else {
         for (uint32_t i = 0; i < ctx->header.num_nodes; i++) {
-            int rc = spkv2_execute_node(ctx, &ctx->node_records[i]);
+            int rc = execute_protected_node(ctx, &ctx->node_records[i]);
             if (rc != 0) return rc;
         }
     }

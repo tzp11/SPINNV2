@@ -178,6 +178,7 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     const Spkv2SectionEntry *weight_sec = find_section(ctx, SPKV2_SECTION_WEIGHTS);
     const Spkv2SectionEntry *memory_plan_sec = find_section(ctx, SPKV2_SECTION_MEMORY_PLAN);
     const Spkv2SectionEntry *kernel_spec_sec = find_section(ctx, SPKV2_SECTION_KERNEL_SPEC);
+    const Spkv2SectionEntry *protection_sec = find_section(ctx, SPKV2_SECTION_PROTECTION_PLAN);
     const Spkv2SectionEntry *checksum_sec = find_section(ctx, SPKV2_SECTION_CHECKSUM);
     if (!tensor_sec || !node_sec || !attr_sec || !weight_sec) {
         spkv2_platform_free(ctx);
@@ -215,6 +216,28 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
         ctx->kernel_spec_records = (const Spkv2KernelSpecRecord *)(ctx->model_data + kernel_spec_sec->offset);
         ctx->kernel_spec_count = (size_t)(kernel_spec_sec->size / sizeof(Spkv2KernelSpecRecord));
     }
+
+    /* Parse optional SECTION_QUANTIZATION (INT8 models only) */
+    const Spkv2SectionEntry *quant_sec = find_section(ctx, SPKV2_SECTION_QUANTIZATION);
+    if (quant_sec && quant_sec->size >= sizeof(Spkv2QuantParamRecord)) {
+        const uint8_t *qbase = ctx->model_data + quant_sec->offset;
+        const Spkv2QuantParamRecord *first = (const Spkv2QuantParamRecord *)qbase;
+        if (first->data_offset > 0) {
+            size_t count = first->data_offset / sizeof(Spkv2QuantParamRecord);
+            if (count > 0 && count * sizeof(Spkv2QuantParamRecord) <= quant_sec->size) {
+                ctx->quant_param_records = (const Spkv2QuantParamRecord *)qbase;
+                ctx->quant_param_count = count;
+                ctx->quant_data = qbase;
+                ctx->quant_data_size = (size_t)quant_sec->size;
+            }
+        }
+    }
+
+    if (protection_sec && protection_sec->size >= sizeof(Spkv2ProtectionRecord)) {
+        ctx->protection_records = (const Spkv2ProtectionRecord *)(ctx->model_data + protection_sec->offset);
+        ctx->protection_count = (size_t)(protection_sec->size / sizeof(Spkv2ProtectionRecord));
+    }
+
     ctx->attrs = ctx->model_data + attr_sec->offset;
     ctx->attrs_size = (size_t)attr_sec->size;
     ctx->weights = ctx->model_data + weight_sec->offset;
@@ -239,6 +262,19 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
     ctx->node_cache_count = ctx->header.num_nodes;
     if (ctx->node_cache_count > 0) {
         ctx->node_cache = (void **)spkv2_platform_calloc(ctx->node_cache_count, sizeof(void *));
+        ctx->node_cache_dtors = (void (**)(void *))spkv2_platform_calloc(ctx->node_cache_count, sizeof(void (*)(void *)));
+        ctx->node_invocation_counts = (uint32_t *)spkv2_platform_calloc(ctx->node_cache_count, sizeof(uint32_t));
+        ctx->range_observations = (Spkv2RangeObservation *)spkv2_platform_calloc(
+            ctx->node_cache_count, sizeof(Spkv2RangeObservation));
+        if (!ctx->node_cache || !ctx->node_invocation_counts || !ctx->range_observations) {
+            spkv2_platform_free(ctx->range_observations);
+            spkv2_platform_free(ctx->node_invocation_counts);
+            spkv2_platform_free(ctx->node_cache_dtors);
+            spkv2_platform_free(ctx->node_cache);
+            spkv2_platform_free(ctx->tensors);
+            spkv2_platform_free(ctx);
+            return -1;
+        }
     }
 
     *out_ctx = ctx;
@@ -248,14 +284,22 @@ int spkv2_load_memory(const void *data, size_t size, Spkv2Context **out_ctx) {
 void spkv2_free(Spkv2Context *ctx) {
     if (!ctx) return;
     if (ctx->node_cache) {
-        for (size_t i = 0; i < ctx->node_cache_count; i++)
-            spkv2_platform_free(ctx->node_cache[i]);
+        for (size_t i = 0; i < ctx->node_cache_count; i++) {
+            if (!ctx->node_cache[i]) continue;
+            if (ctx->node_cache_dtors && ctx->node_cache_dtors[i])
+                ctx->node_cache_dtors[i](ctx->node_cache[i]);
+            else
+                spkv2_platform_free(ctx->node_cache[i]);
+        }
         spkv2_platform_free(ctx->node_cache);
     }
+    spkv2_platform_free(ctx->node_cache_dtors);
     spkv2_platform_free(ctx->owned_scratch);
     spkv2_platform_free(ctx->owned_arena);
     spkv2_platform_free(ctx->output_ids);
     spkv2_platform_free(ctx->tensors);
+    spkv2_platform_free(ctx->range_observations);
+    spkv2_platform_free(ctx->node_invocation_counts);
     spkv2_platform_free(ctx->owned_model);
     spkv2_platform_free(ctx);
 }

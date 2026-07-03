@@ -51,7 +51,7 @@ def run_one(name: str, out_dir: Path, target: str, runner: Path, runs: int) -> d
     input_path = out_dir / "input.bin"
     output_path = out_dir / "output.bin"
     write_model(name, model_path)
-    subprocess.run(["python", "-m", "spinnv2.compiler", "compile", str(model_path), "-o", str(spk_path), "--target", target], check=True)
+    subprocess.run([sys.executable, "-m", "spinnv2.compiler", "compile", str(model_path), "-o", str(spk_path), "--target", target], check=True)
     input_path.write_bytes(np.ascontiguousarray(make_input(name)).tobytes())
     timings = []
     for _ in range(max(1, runs)):

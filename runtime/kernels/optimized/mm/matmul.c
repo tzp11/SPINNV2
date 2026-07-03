@@ -1,7 +1,7 @@
 #include "simd_kernels.h"
 #include "simd_sgemm.h"
 
-#ifdef __AVX2__
+#if defined(__AVX2__) || defined(__ARM_NEON)
 
 #include <string.h>
 
@@ -58,4 +58,4 @@ int kernel_matmul_simd(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scr
 }
 
 
-#endif /* __AVX2__ */
+#endif /* __AVX2__ || __ARM_NEON */

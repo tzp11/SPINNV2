@@ -4,7 +4,7 @@ import numpy as np
 
 from compiler.ir import types
 from compiler.ir.graph import Graph, Node, Tensor
-from compiler.passes.manager import run_pass_pipeline
+from compiler.passes.manager import run_pass_pipeline, pipeline_for_target
 from compiler.passes import transforms
 
 
@@ -212,3 +212,95 @@ def _add_tensor(
 
 def _tensor_array(tensor: Tensor) -> np.ndarray:
     return np.frombuffer(tensor.data or b"", dtype=np.float32).copy().reshape(tensor.shape)
+
+
+def test_pipeline_for_target_includes_conv_add_with_simd():
+    profile = {"backends": ["ref", "cpu", "simd"]}
+    pipeline = pipeline_for_target(profile)
+    assert "FuseConvAdd" in pipeline
+
+
+def test_pipeline_for_target_excludes_conv_add_without_simd():
+    profile = {"backends": ["ref"]}
+    pipeline = pipeline_for_target(profile)
+    assert "FuseConvAdd" not in pipeline
+    assert "FuseConvRelu" in pipeline
+
+
+def test_pipeline_for_target_no_profile_includes_all():
+    pipeline = pipeline_for_target(None)
+    assert "FuseConvAdd" in pipeline
+    assert "FuseConvRelu" in pipeline
+
+
+def test_eliminate_noop_transpose_removes_inverse_pair():
+    graph = Graph(model_name="transpose_noop")
+    _add_tensor(graph, "input", [1, 3, 4, 5], types.ROLE_INPUT)
+    _add_tensor(graph, "t1_out", [1, 4, 5, 3], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "t2_out", [1, 3, 4, 5], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "output", [1, 3, 4, 5], types.ROLE_OUTPUT)
+    graph.inputs = [0]
+    graph.outputs = [3]
+    graph.add_node(Node(0, "Transpose", [0], [1], {"perm": [0, 2, 3, 1]}))
+    graph.add_node(Node(1, "Transpose", [1], [2], {"perm": [0, 3, 1, 2]}))
+    graph.add_node(Node(2, "Relu", [2], [3]))
+
+    changed = transforms.eliminate_noop_transpose(graph)
+
+    assert changed == 2
+    assert [n.op_type for n in graph.nodes] == ["Relu"]
+    assert graph.nodes[0].inputs == graph.inputs
+
+
+def test_eliminate_noop_transpose_keeps_non_inverse():
+    graph = Graph(model_name="transpose_keep")
+    _add_tensor(graph, "input", [1, 3, 4, 5], types.ROLE_INPUT)
+    _add_tensor(graph, "t1_out", [1, 4, 5, 3], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "t2_out", [1, 5, 3, 4], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "output", [1, 5, 3, 4], types.ROLE_OUTPUT)
+    graph.inputs = [0]
+    graph.outputs = [3]
+    graph.add_node(Node(0, "Transpose", [0], [1], {"perm": [0, 2, 3, 1]}))
+    graph.add_node(Node(1, "Transpose", [1], [2], {"perm": [0, 2, 3, 1]}))
+    graph.add_node(Node(2, "Relu", [2], [3]))
+
+    changed = transforms.eliminate_noop_transpose(graph)
+
+    assert changed == 0
+    assert len(graph.nodes) == 3
+
+
+def test_share_constants_deduplicates_identical_weights():
+    graph = Graph(model_name="share_const")
+    data = np.array([1.0, 2.0], dtype=np.float32)
+    _add_tensor(graph, "input", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "w1", [2], types.ROLE_WEIGHT, data)
+    _add_tensor(graph, "w2", [2], types.ROLE_WEIGHT, data.copy())
+    _add_tensor(graph, "add1_out", [1, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "add2_out", [1, 2], types.ROLE_OUTPUT)
+    graph.inputs = [0]
+    graph.outputs = [4]
+    graph.add_node(Node(0, "Add", [0, 1], [3]))
+    graph.add_node(Node(1, "Add", [3, 2], [4]))
+
+    changed = transforms.share_constants(graph)
+
+    assert changed == 1
+    assert graph.nodes[1].inputs[1] == graph.nodes[0].inputs[1]
+
+
+def test_share_constants_keeps_different_weights():
+    graph = Graph(model_name="share_diff")
+    _add_tensor(graph, "input", [1, 2], types.ROLE_INPUT)
+    _add_tensor(graph, "w1", [2], types.ROLE_WEIGHT, np.array([1.0, 2.0], dtype=np.float32))
+    _add_tensor(graph, "w2", [2], types.ROLE_WEIGHT, np.array([3.0, 4.0], dtype=np.float32))
+    _add_tensor(graph, "add1_out", [1, 2], types.ROLE_ACTIVATION)
+    _add_tensor(graph, "add2_out", [1, 2], types.ROLE_OUTPUT)
+    graph.inputs = [0]
+    graph.outputs = [4]
+    graph.add_node(Node(0, "Add", [0, 1], [3]))
+    graph.add_node(Node(1, "Add", [3, 2], [4]))
+
+    changed = transforms.share_constants(graph)
+
+    assert changed == 0

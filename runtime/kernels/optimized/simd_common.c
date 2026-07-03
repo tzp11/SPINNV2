@@ -1,9 +1,13 @@
 #include "simd_common.h"
 
-#ifdef __AVX2__
+#if defined(__AVX2__) || defined(__ARM_NEON)
 
 #include <math.h>
 #include <string.h>
+
+/* ------------------------------------------------------------------ */
+/*  Arch-neutral utility functions                                     */
+/* ------------------------------------------------------------------ */
 
 size_t simd_elem_count(const Spkv2TensorRecord *r)
 {
@@ -29,46 +33,10 @@ int simd_get_attr(const Spkv2Context *ctx,
 
 
 
-__m256 sigmoid_avx2(__m256 x);
-
-
-
-void fused_activation_pass(float *data, size_t count, int act_type)
-{
-    if (act_type == 0) return;
-    size_t i = 0;
-    if (act_type == 1) { /* Relu */
-        __m256 vzero = _mm256_setzero_ps();
-        for (; i + 7 < count; i += 8)
-            _mm256_storeu_ps(data + i,
-                             _mm256_max_ps(_mm256_loadu_ps(data + i), vzero));
-        for (; i < count; i++)
-            if (data[i] < 0.0f) data[i] = 0.0f;
-    } else if (act_type == 2) { /* SiLU: x * sigmoid(x) */
-        for (; i + 7 < count; i += 8) {
-            __m256 x = _mm256_loadu_ps(data + i);
-            _mm256_storeu_ps(data + i, _mm256_mul_ps(x, sigmoid_avx2(x)));
-        }
-        for (; i < count; i++)
-            data[i] = data[i] / (1.0f + expf(-data[i]));
-    }
-}
-
-
-
 float apply_activation_scalar_simd(float x, int act_type)
 {
     if (act_type == 1) return x > 0.0f ? x : 0.0f;
     if (act_type == 2) return x / (1.0f + expf(-x));
-    return x;
-}
-
-
-
-__m256 apply_activation_avx2(__m256 x, int act_type)
-{
-    if (act_type == 1) return _mm256_max_ps(x, _mm256_setzero_ps());
-    if (act_type == 2) return _mm256_mul_ps(x, sigmoid_avx2(x));
     return x;
 }
 
@@ -114,6 +82,47 @@ int same_shape(const Spkv2TensorRecord *a, const Spkv2TensorRecord *b)
     for (uint16_t i = 0; i < a->rank; i++)
         if (a->shape[i] != b->shape[i]) return 0;
     return 1;
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  AVX2-specific functions                                            */
+/* ------------------------------------------------------------------ */
+
+#if defined(__AVX2__)
+
+__m256 sigmoid_avx2(__m256 x);
+
+
+
+void fused_activation_pass(float *data, size_t count, int act_type)
+{
+    if (act_type == 0) return;
+    size_t i = 0;
+    if (act_type == 1) { /* Relu */
+        __m256 vzero = _mm256_setzero_ps();
+        for (; i + 7 < count; i += 8)
+            _mm256_storeu_ps(data + i,
+                             _mm256_max_ps(_mm256_loadu_ps(data + i), vzero));
+        for (; i < count; i++)
+            if (data[i] < 0.0f) data[i] = 0.0f;
+    } else if (act_type == 2) { /* SiLU: x * sigmoid(x) */
+        for (; i + 7 < count; i += 8) {
+            __m256 x = _mm256_loadu_ps(data + i);
+            _mm256_storeu_ps(data + i, _mm256_mul_ps(x, sigmoid_avx2(x)));
+        }
+        for (; i < count; i++)
+            data[i] = data[i] / (1.0f + expf(-data[i]));
+    }
+}
+
+
+
+__m256 apply_activation_avx2(__m256 x, int act_type)
+{
+    if (act_type == 1) return _mm256_max_ps(x, _mm256_setzero_ps());
+    if (act_type == 2) return _mm256_mul_ps(x, sigmoid_avx2(x));
+    return x;
 }
 
 
@@ -190,4 +199,159 @@ float hsum_avx2(__m256 v)
 }
 
 
-#endif /* __AVX2__ */
+/* ------------------------------------------------------------------ */
+/*  NEON-specific functions                                            */
+/* ------------------------------------------------------------------ */
+
+#elif defined(__ARM_NEON)
+
+#include <stdlib.h>
+#if defined(__APPLE__)
+#define ACCELERATE_NEW_LAPACK
+#include <Accelerate/Accelerate.h>
+#include <dispatch/dispatch.h>
+#endif
+
+float32x4_t sigmoid_neon(float32x4_t x);
+
+static _Thread_local float *s_silu_tmp = NULL;
+static _Thread_local size_t s_silu_cap = 0;
+
+static float *get_silu_buf(size_t n) {
+    if (s_silu_cap < n) {
+        free(s_silu_tmp);
+        s_silu_tmp = (float *)malloc(n * sizeof(float));
+        s_silu_cap = s_silu_tmp ? n : 0;
+    }
+    return s_silu_tmp;
+}
+
+
+
+void fused_activation_pass(float *data, size_t count, int act_type)
+{
+    if (act_type == 0) return;
+    size_t i = 0;
+    if (act_type == 1) { /* Relu */
+#if defined(__APPLE__)
+        float zero = 0.0f;
+        vDSP_vthres(data, 1, &zero, data, 1, count);
+#else
+        float32x4_t vzero = vdupq_n_f32(0.0f);
+        for (; i + 3 < count; i += 4)
+            vst1q_f32(data + i,
+                      vmaxq_f32(vld1q_f32(data + i), vzero));
+        for (; i < count; i++)
+            if (data[i] < 0.0f) data[i] = 0.0f;
+#endif
+    } else if (act_type == 2) { /* SiLU: x * sigmoid(x) = x / (1 + exp(-x)) */
+#if defined(__APPLE__)
+        if (count >= 400000) {
+            /* Parallel SiLU for large buffers: split into chunks */
+            size_t nchunks = 8;
+            size_t chunk = (count + nchunks - 1) / nchunks;
+            spkv2_apply(nchunks, ^(size_t ci) {
+                size_t start = ci * chunk;
+                if (start >= count) return;
+                size_t end = start + chunk < count ? start + chunk : count;
+                int nn = (int)(end - start);
+                float *d = data + start;
+                float *tmp = get_silu_buf(end - start);
+                if (tmp) {
+                    vDSP_vneg(d, 1, tmp, 1, nn);
+                    vvexpf(tmp, tmp, &nn);
+                    float one = 1.0f;
+                    vDSP_vsadd(tmp, 1, &one, tmp, 1, nn);
+                    vDSP_vdiv(tmp, 1, d, 1, d, 1, nn);
+                } else {
+                    for (int j = 0; j < nn; j++)
+                        d[j] = d[j] / (1.0f + expf(-d[j]));
+                }
+            });
+        } else {
+            int n = (int)count;
+            float *tmp = get_silu_buf(count);
+            if (tmp) {
+                vDSP_vneg(data, 1, tmp, 1, n);
+                vvexpf(tmp, tmp, &n);
+                float one = 1.0f;
+                vDSP_vsadd(tmp, 1, &one, tmp, 1, n);
+                vDSP_vdiv(tmp, 1, data, 1, data, 1, n);
+            } else {
+                for (size_t j = 0; j < count; j++)
+                    data[j] = data[j] / (1.0f + expf(-data[j]));
+            }
+        }
+#else
+        for (; i + 3 < count; i += 4) {
+            float32x4_t x = vld1q_f32(data + i);
+            vst1q_f32(data + i, vmulq_f32(x, sigmoid_neon(x)));
+        }
+        for (; i < count; i++)
+            data[i] = data[i] / (1.0f + expf(-data[i]));
+#endif
+    }
+}
+
+
+
+float32x4_t apply_activation_neon(float32x4_t x, int act_type)
+{
+    if (act_type == 1) return vmaxq_f32(x, vdupq_n_f32(0.0f));
+    if (act_type == 2) return vmulq_f32(x, sigmoid_neon(x));
+    return x;
+}
+
+
+
+float32x4_t fast_exp_neon(float32x4_t x)
+{
+    /* Clamp to prevent overflow/underflow */
+    x = vmaxq_f32(x, vdupq_n_f32(-87.3f));
+    x = vminq_f32(x, vdupq_n_f32(88.3f));
+
+    /* exp(x) = 2^(n+f) where n = round(x/ln2), f = x/ln2 - n */
+    const float32x4_t log2e  = vdupq_n_f32(1.4426950408889634f);
+    const float32x4_t ln2_hi = vdupq_n_f32(0.693359375f);
+    const float32x4_t ln2_lo = vdupq_n_f32(-2.12194440e-4f);
+
+    float32x4_t fx = vmulq_f32(x, log2e);
+    float32x4_t n  = vrndnq_f32(fx);
+
+    /* f = x - n * ln2 (high precision) */
+    float32x4_t f = vsubq_f32(x, vmulq_f32(n, ln2_hi));
+    f = vsubq_f32(f, vmulq_f32(n, ln2_lo));
+
+    /* Polynomial: exp(f) ~ 1 + f + f^2/2 + f^3/6 + f^4/24 + f^5/120 */
+    float32x4_t y = vdupq_n_f32(1.0f / 120.0f);
+    y = vfmaq_f32(vdupq_n_f32(1.0f / 24.0f), y, f);
+    y = vfmaq_f32(vdupq_n_f32(1.0f / 6.0f), y, f);
+    y = vfmaq_f32(vdupq_n_f32(0.5f), y, f);
+    y = vfmaq_f32(vdupq_n_f32(1.0f), y, f);
+    y = vfmaq_f32(vdupq_n_f32(1.0f), y, f);
+
+    /* 2^n: construct float with exponent = n+127 */
+    int32x4_t ni = vcvtq_s32_f32(n);
+    ni = vaddq_s32(ni, vdupq_n_s32(127));
+    ni = vshlq_n_s32(ni, 23);
+    float32x4_t pow2n = vreinterpretq_f32_s32(ni);
+
+    return vmulq_f32(y, pow2n);
+}
+
+
+
+float32x4_t sigmoid_neon(float32x4_t x)
+{
+    float32x4_t neg_x = vnegq_f32(x);
+    float32x4_t exp_neg_x = fast_exp_neon(neg_x);
+    float32x4_t denom = vaddq_f32(vdupq_n_f32(1.0f), exp_neg_x);
+    float32x4_t rcp = vrecpeq_f32(denom);
+    rcp = vmulq_f32(rcp, vrecpsq_f32(rcp, denom));
+    return rcp;
+}
+
+
+#endif /* __AVX2__ / __ARM_NEON */
+
+#endif /* __AVX2__ || __ARM_NEON */

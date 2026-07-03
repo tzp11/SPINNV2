@@ -12,6 +12,9 @@ from compiler.ir import types
 ALIGNMENT = 16
 GRAPH_END_EXTRA = 1
 
+INPLACE_SHAPE_ONLY_OPS = {"Reshape", "Flatten", "Unsqueeze", "Cast"}
+INPLACE_ELEMENTWISE_OPS = {"Relu"}
+
 
 @dataclass
 class MemoryPlanEntry:
@@ -48,10 +51,25 @@ def plan_memory(
     alloc_output: bool = True,
 ) -> MemoryPlan:
     lifetimes = analyze_lifetimes(graph)
+    inplace_map = _find_inplace_aliases(graph, alloc_input, alloc_output)
+    concat_map = _find_concat_aliases(graph, alloc_input, alloc_output)
+
+    for alias_tid, src_tid in inplace_map.items():
+        src_first, src_last = lifetimes[src_tid]
+        alias_first, alias_last = lifetimes[alias_tid]
+        lifetimes[src_tid] = (min(src_first, alias_first), max(src_last, alias_last))
+
+    for alias_tid, (parent_tid, _byte_off) in concat_map.items():
+        parent_first, parent_last = lifetimes[parent_tid]
+        alias_first, alias_last = lifetimes[alias_tid]
+        lifetimes[parent_tid] = (min(parent_first, alias_first), max(parent_last, alias_last))
+
     planned_tensors = [
         tensor
         for tensor in graph.tensors
         if _should_allocate(tensor, alloc_input=alloc_input, alloc_output=alloc_output)
+        and tensor.id not in inplace_map
+        and tensor.id not in concat_map
     ]
 
     naive = sum(_align(tensor.size_bytes) for tensor in planned_tensors)
@@ -92,6 +110,36 @@ def plan_memory(
 
     for tensor in graph.tensors:
         if tensor.id in entries:
+            continue
+        if tensor.id in inplace_map:
+            src_tid = inplace_map[tensor.id]
+            src_entry = entries[src_tid]
+            first_use, last_use = lifetimes.get(tensor.id, (-1, -1))
+            entries[tensor.id] = MemoryPlanEntry(
+                tensor_id=tensor.id,
+                name=tensor.name,
+                size=tensor.size_bytes,
+                aligned_size=_align(tensor.size_bytes),
+                first_use=first_use,
+                last_use=last_use,
+                offset=src_entry.offset,
+                memory_class=_memory_class(tensor, alloc_input=alloc_input, alloc_output=alloc_output),
+            )
+            continue
+        if tensor.id in concat_map:
+            parent_tid, byte_offset = concat_map[tensor.id]
+            parent_entry = entries[parent_tid]
+            first_use, last_use = lifetimes.get(tensor.id, (-1, -1))
+            entries[tensor.id] = MemoryPlanEntry(
+                tensor_id=tensor.id,
+                name=tensor.name,
+                size=tensor.size_bytes,
+                aligned_size=_align(tensor.size_bytes),
+                first_use=first_use,
+                last_use=last_use,
+                offset=parent_entry.offset + byte_offset,
+                memory_class=_memory_class(tensor, alloc_input=alloc_input, alloc_output=alloc_output),
+            )
             continue
         first_use, last_use = lifetimes.get(tensor.id, (-1, -1))
         entries[tensor.id] = MemoryPlanEntry(
@@ -222,4 +270,111 @@ def _insert_free_block(free_blocks: list[tuple[int, int]], offset: int, size: in
         else:
             merged.append((block_offset, block_size))
     free_blocks[:] = merged
+
+
+def _find_inplace_aliases(
+    graph: Graph, alloc_input: bool, alloc_output: bool
+) -> dict[int, int]:
+    aliases: dict[int, int] = {}
+    output_ids = set(graph.outputs)
+    input_ids = set(graph.inputs)
+    for node in graph.nodes:
+        is_shape_only = node.op_type in INPLACE_SHAPE_ONLY_OPS
+        is_elementwise = node.op_type in INPLACE_ELEMENTWISE_OPS
+        if not is_shape_only and not is_elementwise:
+            continue
+        if len(node.inputs) < 1 or len(node.outputs) < 1:
+            continue
+        in_tid = node.inputs[0]
+        out_tid = node.outputs[0]
+        in_tensor = graph.tensors[in_tid]
+        out_tensor = graph.tensors[out_tid]
+        if in_tensor.size_bytes != out_tensor.size_bytes:
+            continue
+        if not _should_allocate(out_tensor, alloc_input=alloc_input, alloc_output=alloc_output):
+            continue
+        if not _should_allocate(in_tensor, alloc_input=alloc_input, alloc_output=alloc_output):
+            continue
+        if out_tid in output_ids and in_tid in input_ids:
+            continue
+        if is_elementwise and len(in_tensor.consumers) > 1:
+            continue
+        src = aliases.get(in_tid, in_tid)
+        if is_elementwise and src in input_ids:
+            continue
+        aliases[out_tid] = src
+    return aliases
+
+
+def _find_concat_aliases(
+    graph: Graph, alloc_input: bool, alloc_output: bool
+) -> dict[int, tuple[int, int]]:
+    """Find Concat inputs that can be sub-region aliases of the Concat output.
+
+    Returns {input_tensor_id: (concat_output_tensor_id, byte_offset)}.
+    """
+    aliases: dict[int, tuple[int, int]] = {}
+    input_ids = set(graph.inputs)
+    used_as_concat_alias: set[int] = set()
+
+    for node in graph.nodes:
+        if node.op_type != "Concat":
+            continue
+        if len(node.inputs) < 2 or len(node.outputs) < 1:
+            continue
+
+        out_tid = node.outputs[0]
+        out_tensor = graph.tensors[out_tid]
+        if not _should_allocate(out_tensor, alloc_input=alloc_input, alloc_output=alloc_output):
+            continue
+
+        axis = int(node.attrs.get("axis", 0))
+        rank = len(out_tensor.shape)
+        if axis < 0:
+            axis += rank
+        if axis < 0 or axis >= rank:
+            continue
+
+        outer = 1
+        for i in range(axis):
+            outer *= out_tensor.shape[i]
+        if outer != 1:
+            continue
+
+        inner = 1
+        for i in range(axis + 1, rank):
+            inner *= out_tensor.shape[i]
+
+        eligible = True
+        axis_offset = 0
+        input_offsets: list[tuple[int, int]] = []
+
+        for in_tid in node.inputs:
+            in_tensor = graph.tensors[in_tid]
+            if not _should_allocate(in_tensor, alloc_input=alloc_input, alloc_output=alloc_output):
+                eligible = False
+                break
+            if in_tid in input_ids:
+                eligible = False
+                break
+            if in_tid in used_as_concat_alias:
+                eligible = False
+                break
+
+            byte_offset = axis_offset * inner * 4
+            if byte_offset % ALIGNMENT != 0:
+                eligible = False
+                break
+
+            input_offsets.append((in_tid, byte_offset))
+            axis_offset += in_tensor.shape[axis]
+
+        if not eligible:
+            continue
+
+        for in_tid, byte_offset in input_offsets:
+            aliases[in_tid] = (out_tid, byte_offset)
+            used_as_concat_alias.add(in_tid)
+
+    return aliases
 

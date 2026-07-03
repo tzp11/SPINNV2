@@ -13,7 +13,9 @@ TOY_MODELS = ("add", "gemm_softmax", "conv_relu", "conv_bn_relu")
 SMALL_MODELS = ("mnist", "lenet")
 MEDIUM_MODELS = ("resnet18", "mobilenetv2")
 DETECTION_MODELS = ("yolo_tiny_prenms",)
-ALL_MODELS = TOY_MODELS + SMALL_MODELS + MEDIUM_MODELS + DETECTION_MODELS
+WINOGRAD_MODELS = ("winograd_test", "winograd_edge")
+OP_TEST_MODELS = ("avgpool_test", "global_avgpool_test", "clip_test", "leakyrelu_test")
+ALL_MODELS = TOY_MODELS + SMALL_MODELS + MEDIUM_MODELS + DETECTION_MODELS + WINOGRAD_MODELS + OP_TEST_MODELS
 
 
 def write_model(name: str, path: str | Path) -> None:
@@ -30,6 +32,12 @@ def write_model(name: str, path: str | Path) -> None:
         "resnet18": _write_resnet18_like,
         "mobilenetv2": _write_mobilenetv2_like,
         "yolo_tiny_prenms": _write_yolo_tiny_prenms,
+        "winograd_test": _write_winograd_test,
+        "winograd_edge": _write_winograd_edge,
+        "avgpool_test": _write_avgpool_test,
+        "global_avgpool_test": _write_global_avgpool_test,
+        "clip_test": _write_clip_test,
+        "leakyrelu_test": _write_leakyrelu_test,
     }
     if name not in builders:
         raise ValueError(f"unknown generated model: {name}")
@@ -48,6 +56,12 @@ def make_input(name: str) -> np.ndarray:
         "resnet18": (1, 3, 16, 16),
         "mobilenetv2": (1, 3, 16, 16),
         "yolo_tiny_prenms": (1, 3, 16, 16),
+        "winograd_test": (1, 8, 16, 16),
+        "winograd_edge": (1, 8, 9, 9),
+        "avgpool_test": (1, 4, 8, 8),
+        "global_avgpool_test": (1, 4, 8, 8),
+        "clip_test": (1, 4),
+        "leakyrelu_test": (1, 4),
     }
     if name not in shapes:
         raise ValueError(f"unknown generated model: {name}")
@@ -60,6 +74,8 @@ def output_tolerance(name: str) -> tuple[float, float]:
         return 1e-3, 1e-5
     if name in {"resnet18", "mobilenetv2", "yolo_tiny_prenms"}:
         return 1e-3, 1e-5
+    if name in {"winograd_test", "winograd_edge"}:
+        return 1e-3, 1e-4
     return 1e-4, 1e-5
 
 
@@ -294,4 +310,90 @@ def _write_yolo_tiny_prenms(path: Path) -> None:
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 16, 16])],
         [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 16, 16, 8])],
         [numpy_helper.from_array(w, "w"), numpy_helper.from_array(b, "b")],
+    )
+
+
+def _write_winograd_test(path: Path) -> None:
+    w = _weight((16, 8, 3, 3), 0.01, -0.1)
+    b = np.linspace(-0.02, 0.02, num=16, dtype=np.float32)
+    _save(
+        path,
+        [
+            helper.make_node("Conv", ["input", "w", "b"], ["conv"],
+                             pads=[1, 1, 1, 1], kernel_shape=[3, 3]),
+            helper.make_node("Relu", ["conv"], ["output"]),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 8, 16, 16])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 16, 16, 16])],
+        [numpy_helper.from_array(w, "w"), numpy_helper.from_array(b, "b")],
+    )
+
+
+def _write_winograd_edge(path: Path) -> None:
+    w = _weight((16, 8, 3, 3), 0.01, -0.1)
+    b = np.linspace(-0.02, 0.02, num=16, dtype=np.float32)
+    _save(
+        path,
+        [
+            helper.make_node("Conv", ["input", "w", "b"], ["conv"],
+                             pads=[1, 1, 1, 1], kernel_shape=[3, 3]),
+            helper.make_node("Relu", ["conv"], ["output"]),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 8, 9, 9])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 16, 9, 9])],
+        [numpy_helper.from_array(w, "w"), numpy_helper.from_array(b, "b")],
+    )
+
+
+def _write_avgpool_test(path: Path) -> None:
+    _save(
+        path,
+        [
+            helper.make_node("AveragePool", ["input"], ["output"],
+                             kernel_shape=[3, 3], strides=[2, 2], pads=[1, 1, 1, 1]),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4, 8, 8])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4, 4, 4])],
+        [],
+    )
+
+
+def _write_global_avgpool_test(path: Path) -> None:
+    _save(
+        path,
+        [
+            helper.make_node("GlobalAveragePool", ["input"], ["output"]),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4, 8, 8])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4, 1, 1])],
+        [],
+    )
+
+
+def _write_clip_test(path: Path) -> None:
+    min_val = np.array(-0.5, dtype=np.float32)
+    max_val = np.array(0.5, dtype=np.float32)
+    _save(
+        path,
+        [
+            helper.make_node("Clip", ["input", "clip_min", "clip_max"], ["output"]),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])],
+        [
+            numpy_helper.from_array(min_val, "clip_min"),
+            numpy_helper.from_array(max_val, "clip_max"),
+        ],
+    )
+
+
+def _write_leakyrelu_test(path: Path) -> None:
+    _save(
+        path,
+        [
+            helper.make_node("LeakyRelu", ["input"], ["output"], alpha=0.1),
+        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])],
+        [],
     )

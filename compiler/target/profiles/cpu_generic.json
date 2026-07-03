@@ -9,7 +9,8 @@
     "allow_runtime_malloc": false
   },
   "features": [
-    "fp32"
+    "fp32",
+    "int8"
   ],
   "layouts": [
     "NCHW"
@@ -24,16 +25,25 @@
       "simd",
       "ref"
     ],
+    "AveragePool": [
+      "simd",
+      "ref"
+    ],
     "Cast": [
       "ref"
     ],
     "Concat": [
       "ref"
     ],
+    "Clip": [
+      "simd",
+      "ref"
+    ],
     "Conv": [
+      "simd_int8_im2col_gemm",
+      "simd_bnns_fp32",
       "simd_pointwise_1x1",
       "simd_depthwise_direct",
-      "simd_winograd_3x3s1",
       "simd_im2col_gemm",
       "im2col_gemm",
       "ref"
@@ -45,6 +55,9 @@
     "Flatten": [
       "ref"
     ],
+    "Gather": [
+      "ref"
+    ],
     "GatherElements": [
       "ref"
     ],
@@ -53,11 +66,20 @@
       "direct",
       "ref"
     ],
+    "GlobalAveragePool": [
+      "simd",
+      "ref"
+    ],
+    "LeakyRelu": [
+      "simd",
+      "ref"
+    ],
     "MatMul": [
       "simd_direct",
       "ref"
     ],
     "MaxPool": [
+      "simd",
       "ref"
     ],
     "Mod": [
@@ -83,10 +105,14 @@
       "ref"
     ],
     "Resize": [
+      "simd",
       "ref"
     ],
     "Sigmoid": [
       "simd",
+      "ref"
+    ],
+    "Slice": [
       "ref"
     ],
     "Softmax": [

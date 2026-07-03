@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -11,10 +12,10 @@ def test_m6_table_export_and_repro_check_accept_valid_report(tmp_path: Path):
     report_path.write_text(json.dumps(_valid_report()), encoding="utf-8")
 
     subprocess.run(
-        ["python", "scripts/export_paper_tables.py", str(report_path), "--out-dir", str(tables_dir)],
+        [sys.executable, "scripts/export_paper_tables.py", str(report_path), "--out-dir", str(tables_dir)],
         check=True,
     )
-    subprocess.run(["python", "scripts/check_reproducibility.py", str(report_path)], check=True)
+    subprocess.run([sys.executable, "scripts/check_reproducibility.py", str(report_path)], check=True)
 
     assert (tables_dir / "correctness.csv").exists()
     assert (tables_dir / "memory.md").exists()
@@ -29,7 +30,7 @@ def test_m6_repro_check_rejects_failed_threshold(tmp_path: Path):
     report_path.write_text(json.dumps(report), encoding="utf-8")
 
     result = subprocess.run(
-        ["python", "scripts/check_reproducibility.py", str(report_path)],
+        [sys.executable, "scripts/check_reproducibility.py", str(report_path)],
         text=True,
         capture_output=True,
     )

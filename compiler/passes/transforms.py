@@ -206,6 +206,89 @@ def fuse_add_relu(graph: Graph) -> int:
     return changed
 
 
+def fuse_conv_add(graph: Graph) -> int:
+    """Fuse Conv + Add into a single Conv with residual input.
+
+    Pattern: Conv(...) -> conv_out -> Add(conv_out, residual) -> add_out
+    Result:  Conv(..., residual) -> add_out  (with fused_activation from Add)
+    """
+    rebuild_graph_links(graph)
+    changed = 0
+    remove_nodes: set[int] = set()
+    for add in list(graph.nodes):
+        if add.op_type != "Add" or len(add.inputs) != 2 or not add.outputs:
+            continue
+        for side in range(2):
+            conv_out = add.inputs[side]
+            residual_in = add.inputs[1 - side]
+            conv_node_id = graph.tensors[conv_out].producer
+            if conv_node_id is None:
+                continue
+            conv = graph.nodes[conv_node_id]
+            if conv.op_type != "Conv":
+                continue
+            if _active_consumers(graph, conv_out, ignore_node=add.id) != 0:
+                continue
+            if conv.attrs.get("fused_activation"):
+                continue
+            if len(conv.inputs) < 3:
+                zero_bias_oc = graph.tensors[conv.inputs[1]].shape[0]
+                b_id = _add_weight_tensor(
+                    graph,
+                    f"{graph.tensors[conv.inputs[1]].name}_zero_bias",
+                    np.zeros((zero_bias_oc,), dtype=np.float32),
+                )
+                conv.inputs.append(b_id)
+            conv.inputs.append(residual_in)
+            add_act = add.attrs.get("fused_activation")
+            if add_act:
+                conv.attrs["fused_activation"] = add_act
+            conv.outputs[0] = add.outputs[0]
+            graph.tensors[add.outputs[0]].producer = conv.id
+            remove_nodes.add(add.id)
+            changed += 1
+            break
+
+    if remove_nodes:
+        graph.nodes = [node for node in graph.nodes if node.id not in remove_nodes]
+        _topological_sort(graph)
+        _compact_graph(graph)
+    return changed
+
+
+def eliminate_noop_transpose(graph: Graph) -> int:
+    rebuild_graph_links(graph)
+    changed = 0
+    remove_nodes: set[int] = set()
+    for t2 in list(graph.nodes):
+        if t2.op_type != "Transpose" or t2.id in remove_nodes:
+            continue
+        t2_input = t2.inputs[0]
+        t1_id = graph.tensors[t2_input].producer
+        if t1_id is None:
+            continue
+        t1 = graph.nodes[t1_id]
+        if t1.op_type != "Transpose" or t1.id in remove_nodes:
+            continue
+        if _active_consumers(graph, t2_input, ignore_node=t2.id) != 0:
+            continue
+        perm1 = t1.attrs.get("perm", [])
+        perm2 = t2.attrs.get("perm", [])
+        if not perm1 or not perm2 or len(perm1) != len(perm2):
+            continue
+        composed = [perm1[p] for p in perm2]
+        if composed != list(range(len(composed))):
+            continue
+        _redirect_tensor(graph, t2.outputs[0], t1.inputs[0])
+        remove_nodes.update({t1.id, t2.id})
+        changed += 2
+
+    if remove_nodes:
+        graph.nodes = [n for n in graph.nodes if n.id not in remove_nodes]
+        _compact_graph(graph)
+    return changed
+
+
 def eliminate_dead(graph: Graph) -> int:
     rebuild_graph_links(graph)
     live_tensors = set(graph.outputs)
@@ -229,6 +312,25 @@ def eliminate_dead(graph: Graph) -> int:
     changed += before - len(graph.nodes)
     _compact_graph(graph)
     return changed
+
+
+def share_constants(graph: Graph) -> int:
+    seen: dict[tuple[tuple[int, ...], bytes], int] = {}
+    redirect_map: dict[int, int] = {}
+    for tensor in graph.tensors:
+        if tensor.role not in {types.ROLE_WEIGHT, types.ROLE_CONSTANT} or tensor.data is None:
+            continue
+        key = (tuple(tensor.shape), tensor.data)
+        if key in seen:
+            redirect_map[tensor.id] = seen[key]
+        else:
+            seen[key] = tensor.id
+    if not redirect_map:
+        return 0
+    for old_id, new_id in redirect_map.items():
+        _redirect_tensor(graph, old_id, new_id)
+    _compact_graph(graph)
+    return len(redirect_map)
 
 
 def _redirect_tensor(graph: Graph, old_id: int, new_id: int) -> None:
@@ -310,6 +412,41 @@ def _add_weight_tensor(graph: Graph, name: str, value: np.ndarray) -> int:
         )
     )
     return tensor_id
+
+
+def _topological_sort(graph: Graph) -> None:
+    rebuild_graph_links(graph)
+    tensor_producer: dict[int, int] = {}
+    for idx, node in enumerate(graph.nodes):
+        for out_id in node.outputs:
+            tensor_producer[out_id] = idx
+
+    n = len(graph.nodes)
+    adj: list[list[int]] = [[] for _ in range(n)]
+    in_degree = [0] * n
+    for idx, node in enumerate(graph.nodes):
+        for inp_id in node.inputs:
+            prod = tensor_producer.get(inp_id)
+            if prod is not None and prod != idx:
+                adj[prod].append(idx)
+                in_degree[idx] += 1
+
+    from collections import deque
+    queue: deque[int] = deque()
+    for i in range(n):
+        if in_degree[i] == 0:
+            queue.append(i)
+
+    order: list[int] = []
+    while queue:
+        u = queue.popleft()
+        order.append(u)
+        for v in adj[u]:
+            in_degree[v] -= 1
+            if in_degree[v] == 0:
+                queue.append(v)
+
+    graph.nodes = [graph.nodes[i] for i in order]
 
 
 def _eval_constant_node(graph: Graph, node: Node) -> np.ndarray | None:

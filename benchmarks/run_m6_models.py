@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -67,7 +68,7 @@ def run_model(
     }
     spk_path = out_dir / f"{name}.spk"
     compile_cmd = [
-        "python",
+        sys.executable,
         "-m",
         "spinnv2.compiler",
         "compile",

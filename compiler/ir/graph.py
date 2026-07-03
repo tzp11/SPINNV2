@@ -29,9 +29,13 @@ class Tensor:
 
     @property
     def size_bytes(self) -> int:
-        if self.dtype != types.DTYPE_FP32:
-            raise ValueError(f"unsupported dtype in M1: {self.dtype}")
-        return self.elem_count * 4
+        if self.dtype == types.DTYPE_FP32:
+            return self.elem_count * 4
+        if self.dtype == types.DTYPE_INT8:
+            return self.elem_count * 1
+        if self.dtype == types.DTYPE_FP16:
+            return self.elem_count * 2
+        raise ValueError(f"unsupported dtype in M1: {self.dtype}")
 
 
 @dataclass

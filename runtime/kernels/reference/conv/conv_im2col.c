@@ -13,6 +13,7 @@ int kernel_conv_im2col(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scr
     const float *x = (const float *)ctx->tensors[node->inputs[0]].data;
     const float *w = (const float *)ctx->tensors[node->inputs[1]].data;
     const float *bias = node->input_count > 2 ? (const float *)ctx->tensors[node->inputs[2]].data : NULL;
+    const float *residual = node->input_count > 3 ? (const float *)ctx->tensors[node->inputs[3]].data : NULL;
     float *y = (float *)ctx->tensors[node->outputs[0]].data;
     float *patch = (float *)scratch;
 
@@ -50,8 +51,10 @@ int kernel_conv_im2col(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scr
                     for (int k = 0; k < patch_len; k++) {
                         sum += patch[k] * w_row[k];
                     }
+                    size_t yi = ((size_t)n * M * outH * outW) + ((size_t)m * outH * outW) + ((size_t)oh * outW) + ow;
+                    if (residual) sum += residual[yi];
                     sum = spkv2_kernel_apply_fused_activation_scalar(sum, attr.fused_activation);
-                    y[((size_t)n * M * outH * outW) + ((size_t)m * outH * outW) + ((size_t)oh * outW) + ow] = sum;
+                    y[yi] = sum;
                 }
             }
         }

@@ -1,0 +1,42 @@
+experiment:
+  name: windows_prevalidation
+  seed: 2026
+  output_root: artifacts/experiments/windows_prevalidation
+
+datasets:
+  eurosat:
+    root: artifacts/data/eurosat
+    split_seed: 2026
+    train_ratio: 0.70
+    val_ratio: 0.15
+  dior:
+    root: artifacts/data/dior
+    archive: null
+    split_seed: 2026
+
+models:
+  resnet50:
+    task: classification
+    input_shape: [1, 3, 224, 224]
+    num_classes: 10
+    onnx_path: artifacts/models/resnet50_eurosat.onnx
+  yolov10n:
+    task: detection
+    input_shape: [1, 3, 640, 640]
+    num_classes: 20
+    onnx_path: artifacts/models/yolov10n_dior.onnx
+
+fault_model:
+  type: single_bit_activation_output
+  bit_sampling: all_bits
+  fault_prior: activation_bytes_weighted
+  report_uniform_node_prior: true
+
+risk:
+  critical_failure_weight: 0.65
+  severity_weight: 0.25
+  exposure_weight: 0.10
+
+budgets:
+  latency_overhead_ratios: [0.05, 0.10, 0.20]
+  extra_memory_bytes: [1048576, 4194304, 8388608]

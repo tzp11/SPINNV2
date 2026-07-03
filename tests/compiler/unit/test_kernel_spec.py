@@ -8,6 +8,19 @@ from compiler.planner.kernel_spec import select_kernel_specs
 from compiler.target.profile import load_target_profile
 
 
+def _profile_has_bnns(profile: dict) -> bool:
+    """True when the profile lists simd_bnns_fp32 for Conv (Apple path)."""
+    return "simd_bnns_fp32" in profile.get("ops", {}).get("Conv", [])
+
+
+def _profile_without_bnns(profile: dict) -> dict:
+    """Return a copy of the profile with simd_bnns_fp32 removed from Conv."""
+    import copy
+    p = copy.deepcopy(profile)
+    p["ops"]["Conv"] = [k for k in p["ops"]["Conv"] if k != "simd_bnns_fp32"]
+    return p
+
+
 def test_cpu_ref_selects_reference_kernels_only():
     graph = _conv_gemm_graph()
     plan = select_kernel_specs(graph, load_target_profile("cpu_ref"))
@@ -20,12 +33,16 @@ def test_cpu_ref_selects_reference_kernels_only():
 
 
 def test_cpu_generic_selects_optimized_conv_and_gemm_with_ref_fallbacks():
+    profile = load_target_profile("cpu_generic")
     graph = _conv_gemm_graph()
-    plan = select_kernel_specs(graph, load_target_profile("cpu_generic"))
+    plan = select_kernel_specs(graph, profile)
 
     conv_spec = plan.by_node[0]
     gemm_spec = plan.by_node[1]
-    assert (conv_spec.backend, conv_spec.kernel_kind) == ("simd", "pointwise_1x1")
+    # On Apple (simd_bnns_fp32 in profile) a 1×1 Conv becomes bnns_fp32 instead of pointwise_1x1.
+    # Both are zero-scratch SIMD kernels with a ref fallback — the distinction that matters.
+    expected_conv_kind = "bnns_fp32" if _profile_has_bnns(profile) else "pointwise_1x1"
+    assert (conv_spec.backend, conv_spec.kernel_kind) == ("simd", expected_conv_kind)
     assert conv_spec.scratch_bytes == 0
     assert conv_spec.fallback_kernel_spec_id != 0xFFFFFFFF
     assert (gemm_spec.backend, gemm_spec.kernel_kind) == ("simd", "direct")
@@ -36,13 +53,33 @@ def test_cpu_generic_selects_optimized_conv_and_gemm_with_ref_fallbacks():
 
 def test_cpu_generic_selects_shape_specific_conv_kinds():
     profile = load_target_profile("cpu_generic")
+    has_bnns = _profile_has_bnns(profile)
+
+    def grp1(default: str) -> str:
+        # BNNS handles all group==1 Conv when available; depthwise (group!=1) is unaffected.
+        return "bnns_fp32" if has_bnns else default
 
     cases = [
-        (_conv_only_graph([1, 16, 8, 8], [32, 16, 1, 1], [1, 32, 8, 8], {"kernel_shape": [1, 1]}), "pointwise_1x1"),
-        (_conv_only_graph([1, 8, 8, 8], [8, 1, 3, 3], [1, 8, 8, 8], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "group": 8}), "depthwise_direct"),
-        (_conv_only_graph([1, 16, 16, 16], [16, 16, 3, 3], [1, 16, 16, 16], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]}), "im2col_gemm"),
-        (_conv_only_graph([1, 8, 8, 8], [16, 8, 3, 3], [1, 16, 4, 4], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "strides": [2, 2]}), "im2col_gemm"),
-        (_conv_only_graph([1, 8, 8, 8], [16, 8, 5, 5], [1, 16, 8, 8], {"kernel_shape": [5, 5], "pads": [2, 2, 2, 2]}), "im2col_gemm"),
+        (_conv_only_graph([1, 16, 8, 8], [32, 16, 1, 1], [1, 32, 8, 8], {"kernel_shape": [1, 1]}),
+         grp1("pointwise_1x1")),
+        (_conv_only_graph([1, 8, 8, 8], [8, 1, 3, 3], [1, 8, 8, 8], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "group": 8}),
+         "depthwise_direct"),
+        # 3x3 s1 p1 with large spatial + channels
+        (_conv_only_graph([1, 16, 16, 16], [16, 16, 3, 3], [1, 16, 16, 16], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]}),
+         grp1("im2col_gemm")),
+        (_conv_only_graph([1, 8, 8, 8], [16, 8, 3, 3], [1, 16, 4, 4], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "strides": [2, 2]}),
+         grp1("im2col_gemm")),
+        (_conv_only_graph([1, 8, 8, 8], [16, 8, 5, 5], [1, 16, 8, 8], {"kernel_shape": [5, 5], "pads": [2, 2, 2, 2]}),
+         grp1("im2col_gemm")),
+        # small spatial
+        (_conv_only_graph([1, 16, 4, 4], [16, 16, 3, 3], [1, 16, 4, 4], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]}),
+         grp1("im2col_gemm")),
+        # small channels (both < 8)
+        (_conv_only_graph([1, 2, 16, 16], [4, 2, 3, 3], [1, 4, 16, 16], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]}),
+         grp1("im2col_gemm")),
+        # out_c >= 8 sufficient
+        (_conv_only_graph([1, 4, 16, 16], [16, 4, 3, 3], [1, 16, 16, 16], {"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]}),
+         grp1("im2col_gemm")),
     ]
 
     for graph, expected_kind in cases:
@@ -57,7 +94,9 @@ def test_scratch_budget_violation_raises():
         [1, 16, 8, 8],
         {"kernel_shape": [5, 5], "pads": [2, 2, 2, 2]},
     )
-    profile = load_target_profile("cpu_generic")
+    # BNNS uses zero scratch, so it would never trigger a budget error.
+    # Remove it from the profile to test the scratch enforcement path (im2col_gemm).
+    profile = _profile_without_bnns(load_target_profile("cpu_generic"))
     profile["memory"]["scratch_arena_max"] = 8
 
     with pytest.raises(MemoryError):

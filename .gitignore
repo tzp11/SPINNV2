@@ -15,3 +15,21 @@ cmake-build-*/
 *.spk.json
 *.bak
 memory_plan.csv
+
+# 实验产物/大文件（本地保留，不入git）
+artifacts/
+runs/
+*.pt
+*.onnx
+*.npy
+
+# 散落的误生成文件
+/10
+/20
+/50
+/100
+
+# 系统/IDE
+.DS_Store
+.vscode/
+.idea/

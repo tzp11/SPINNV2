@@ -60,8 +60,8 @@ def _branch_graph() -> Graph:
         graph.add_tensor(tensor)
     graph.inputs = [0]
     graph.outputs = [4]
-    graph.add_node(Node(0, "Relu", [0], [1]))
-    graph.add_node(Node(1, "Relu", [1], [2]))
-    graph.add_node(Node(2, "Relu", [2], [3]))
-    graph.add_node(Node(3, "Relu", [3], [4]))
+    graph.add_node(Node(0, "Sigmoid", [0], [1]))
+    graph.add_node(Node(1, "Sigmoid", [1], [2]))
+    graph.add_node(Node(2, "Sigmoid", [2], [3]))
+    graph.add_node(Node(3, "Sigmoid", [3], [4]))
     return graph

@@ -50,7 +50,7 @@ def run_one(name: str, out_dir: Path, target: str) -> dict:
     write_model(name, model_path)
     subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "spinnv2.compiler",
             "compile",
@@ -66,7 +66,7 @@ def run_one(name: str, out_dir: Path, target: str) -> dict:
     )
     subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "spinnv2.compiler",
             "codegen",

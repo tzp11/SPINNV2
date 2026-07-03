@@ -21,7 +21,13 @@
     "Add": [
       "ref"
     ],
+    "AveragePool": [
+      "ref"
+    ],
     "Cast": [
+      "ref"
+    ],
+    "Clip": [
       "ref"
     ],
     "Concat": [
@@ -36,10 +42,19 @@
     "Flatten": [
       "ref"
     ],
+    "Gather": [
+      "ref"
+    ],
     "GatherElements": [
       "ref"
     ],
     "Gemm": [
+      "ref"
+    ],
+    "GlobalAveragePool": [
+      "ref"
+    ],
+    "LeakyRelu": [
       "ref"
     ],
     "MatMul": [
@@ -70,6 +85,9 @@
       "ref"
     ],
     "Sigmoid": [
+      "ref"
+    ],
+    "Slice": [
       "ref"
     ],
     "Softmax": [

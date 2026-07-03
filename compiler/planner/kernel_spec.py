@@ -18,14 +18,20 @@ KIND_IM2COL_GEMM = "im2col_gemm"
 KIND_POINTWISE_1X1 = "pointwise_1x1"
 KIND_DEPTHWISE_DIRECT = "depthwise_direct"
 KIND_WINOGRAD_3X3S1 = "winograd_3x3s1"
+KIND_WINOGRAD_F43 = "winograd_f43"
 KIND_CONV3X3S2_DIRECT = "conv3x3s2_direct"
+KIND_INT8_IM2COL_GEMM = "int8_im2col_gemm"
+KIND_BNNS_FP32 = "bnns_fp32"
 
 # Target-profile op-support tokens that map to (backend, kind) pairs
 SIMD_IM2COL_GEMM = "simd_im2col_gemm"
 SIMD_POINTWISE_1X1 = "simd_pointwise_1x1"
 SIMD_DEPTHWISE_DIRECT = "simd_depthwise_direct"
 SIMD_WINOGRAD_3X3S1 = "simd_winograd_3x3s1"
+SIMD_WINOGRAD_F43 = "simd_winograd_f43"
 SIMD_CONV3X3S2_DIRECT = "simd_conv3x3s2_direct"
+SIMD_INT8_IM2COL_GEMM = "simd_int8_im2col_gemm"
+SIMD_BNNS_FP32 = "simd_bnns_fp32"
 SIMD_DIRECT = "simd_direct"
 SIMD_REF = "simd"
 
@@ -113,6 +119,11 @@ def select_kernel_specs(graph: Graph, target_profile: dict) -> KernelPlan:
 def _select_primary_spec(graph: Graph, node: Node, op_support: list[str]) -> KernelSpec | None:
     # SIMD paths (preferred when target advertises them)
     if node.op_type == "Conv":
+        if len(node.inputs) > 1:
+            w_tensor = graph.tensors[node.inputs[1]]
+            group = int(node.attrs.get("group", 1))
+            if w_tensor.dtype == types.DTYPE_INT8 and group == 1 and SIMD_INT8_IM2COL_GEMM in op_support:
+                return _make_spec(graph, node, KIND_INT8_IM2COL_GEMM, BACKEND_SIMD, dtype=types.DTYPE_INT8)
         conv_kind = _select_simd_conv_kind(graph, node, op_support)
         if conv_kind is not None:
             return _make_spec(graph, node, conv_kind, BACKEND_SIMD)
@@ -120,7 +131,8 @@ def _select_primary_spec(graph: Graph, node: Node, op_support: list[str]) -> Ker
         return _make_spec(graph, node, KIND_DIRECT, BACKEND_SIMD)
     if SIMD_REF in op_support and node.op_type in {
         "Add", "Mul", "Sub", "Div", "Relu", "Sigmoid", "Transpose",
-        "ReduceMax", "ReduceMean", "Softmax",
+        "ReduceMax", "ReduceMean", "Softmax", "MaxPool", "Resize",
+        "AveragePool", "GlobalAveragePool", "Clip", "LeakyRelu",
     }:
         return _make_spec(graph, node, KIND_REFERENCE, BACKEND_SIMD)
     # CPU paths (fallback from SIMD)
@@ -146,6 +158,10 @@ def _select_simd_conv_kind(graph: Graph, node: Node, op_support: list[str]) -> s
     k_h, k_w = int(w.shape[2]), int(w.shape[3])
     in_c, out_c = int(x.shape[1]), int(w.shape[0])
 
+    # BNNS FP32: all group==1 convolutions on Apple (non-depthwise)
+    if SIMD_BNNS_FP32 in op_support and group == 1:
+        return KIND_BNNS_FP32
+
     if (
         SIMD_POINTWISE_1X1 in op_support
         and group == 1
@@ -167,36 +183,64 @@ def _select_simd_conv_kind(graph: Graph, node: Node, op_support: list[str]) -> s
     ):
         return KIND_DEPTHWISE_DIRECT
 
-    # Winograd F(2,3) is implemented in the runtime for controlled testing, but
-    # not selected by default yet. Current A/B on YOLOv10n and ResNet101 shows
-    # it is slower than the existing packed im2col+SGEMM path because transform
-    # and per-alpha GEMM overhead dominate.
+    # Winograd F(4,3): 4×4 output tile amortizes transform cost much better than F(2,3).
+    # F(2,3) is kept in the runtime but not selected (transform overhead dominates).
+    if (
+        SIMD_WINOGRAD_F43 in op_support
+        and group == 1
+        and k_h == 3
+        and k_w == 3
+        and strides == [1, 1]
+        and dilations == [1, 1]
+        and pads == [1, 1, 1, 1]
+    ):
+        y = graph.tensors[node.outputs[0]]
+        if len(y.shape) == 4:
+            oh, ow = int(y.shape[2]), int(y.shape[3])
+            tile_count = ((oh + 3) // 4) * ((ow + 3) // 4)
+            scratch_needed = 36 * (in_c + out_c) * tile_count * 4
+            if (oh >= 8 and ow >= 8
+                    and (in_c >= 8 or out_c >= 8)
+                    and tile_count >= 4
+                    and scratch_needed <= _SIMD_TILE_BYTES):
+                return KIND_WINOGRAD_F43
 
     # Keep the stride-2 direct kind in the format/runtime for experiments, but
-    # do not select it by default. The gather-heavy direct path is slower than
-    # the existing im2col+SGEMM path on YOLO downsample layers.
+    # do not select it by default.
+
+    if (
+        SIMD_CONV3X3S2_DIRECT in op_support
+        and group == 1
+        and k_h == 3
+        and k_w == 3
+        and strides == [2, 2]
+        and dilations == [1, 1]
+        and pads == [1, 1, 1, 1]
+    ):
+        return KIND_CONV3X3S2_DIRECT
 
     if SIMD_IM2COL_GEMM in op_support:
         return KIND_IM2COL_GEMM
     return None
 
 
-def _make_spec(graph: Graph, node: Node, kernel_kind: str, backend: str) -> KernelSpec:
+def _make_spec(graph: Graph, node: Node, kernel_kind: str, backend: str, dtype: str = DTYPE_FP32) -> KernelSpec:
     return KernelSpec(
         id=0,
         node_id=node.id,
         op_type=node.op_type,
         kernel_kind=kernel_kind,
         backend=backend,
+        dtype=dtype,
         scratch_bytes=_estimate_scratch_bytes(graph, node, kernel_kind, backend),
-        required_features=[types.DTYPE_FP32],
+        required_features=[dtype],
     )
 
 
 def _estimate_scratch_bytes(graph: Graph, node: Node, kernel_kind: str, backend: str = BACKEND_REF) -> int:
     if node.op_type != "Conv":
         return 0
-    if kernel_kind in {KIND_POINTWISE_1X1, KIND_DEPTHWISE_DIRECT, KIND_CONV3X3S2_DIRECT}:
+    if kernel_kind in {KIND_POINTWISE_1X1, KIND_DEPTHWISE_DIRECT, KIND_CONV3X3S2_DIRECT, KIND_BNNS_FP32}:
         return 0
     if kernel_kind == KIND_WINOGRAD_3X3S1:
         x = graph.tensors[node.inputs[0]]
@@ -208,6 +252,30 @@ def _estimate_scratch_bytes(graph: Graph, node: Node, kernel_kind: str, backend:
         channels = x.shape[1]
         out_c = w.shape[0]
         return _align(min(16 * (channels + out_c) * tile_count * 4, _SIMD_TILE_BYTES), 16)
+    if kernel_kind == KIND_WINOGRAD_F43:
+        x = graph.tensors[node.inputs[0]]
+        w = graph.tensors[node.inputs[1]]
+        y = graph.tensors[node.outputs[0]]
+        if len(x.shape) != 4 or len(w.shape) != 4 or len(y.shape) != 4:
+            return 0
+        tile_count = ((y.shape[2] + 3) // 4) * ((y.shape[3] + 3) // 4)
+        channels = x.shape[1]
+        out_c = w.shape[0]
+        return _align(min(36 * (channels + out_c) * tile_count * 4, _SIMD_TILE_BYTES), 16)
+    if kernel_kind == KIND_INT8_IM2COL_GEMM:
+        x = graph.tensors[node.inputs[0]]
+        w = graph.tensors[node.inputs[1]]
+        y = graph.tensors[node.outputs[0]]
+        if len(x.shape) != 4 or len(w.shape) != 4 or len(y.shape) != 4:
+            return 0
+        C_in, H, W = x.shape[1], x.shape[2], x.shape[3]
+        C_out = w.shape[0]
+        K = C_in * w.shape[2] * w.shape[3]
+        spatial = y.shape[2] * y.shape[3]
+        act_i8 = C_in * H * W
+        col_i8 = K * spatial
+        acc_i32 = C_out * spatial * 4
+        return _align(act_i8 + col_i8 + acc_i32, 16)
     if kernel_kind != KIND_IM2COL_GEMM:
         return 0
     x = graph.tensors[node.inputs[0]]
@@ -220,11 +288,11 @@ def _estimate_scratch_bytes(graph: Graph, node: Node, kernel_kind: str, backend:
     K = channels * kernel_h * kernel_w
 
     if backend == BACKEND_SIMD:
-        # SIMD path needs a tile of the full im2col matrix: K × tile_n floats
         y = graph.tensors[node.outputs[0]]
         spatial = y.shape[2] * y.shape[3] if len(y.shape) == 4 else 1
         full_bytes = K * spatial * 4
-        return _align(min(full_bytes, _SIMD_TILE_BYTES), 16)
+        seg_cap = 2 * 1024 * 1024  # 2 MiB: segmented im2col for cache locality
+        return _align(min(full_bytes, seg_cap), 16)
 
     # Original CPU im2col: one column vector
     return _align(K * 4, 16)

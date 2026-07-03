@@ -1,0 +1,147 @@
+{
+  "name": "cpu_arm_neon",
+  "word_size": 64,
+  "endianness": "little",
+  "alignment": 16,
+  "memory": {
+    "activation_arena_max": 67108864,
+    "scratch_arena_max": 33554432,
+    "allow_runtime_malloc": false
+  },
+  "features": [
+    "fp32",
+    "int8"
+  ],
+  "layouts": [
+    "NCHW"
+  ],
+  "backends": [
+    "ref",
+    "cpu",
+    "simd"
+  ],
+  "ops": {
+    "Add": [
+      "simd",
+      "ref"
+    ],
+    "AveragePool": [
+      "simd",
+      "ref"
+    ],
+    "Cast": [
+      "ref"
+    ],
+    "Concat": [
+      "ref"
+    ],
+    "Clip": [
+      "simd",
+      "ref"
+    ],
+    "Conv": [
+      "simd_int8_im2col_gemm",
+      "simd_pointwise_1x1",
+      "simd_depthwise_direct",
+      "simd_winograd_f43",
+      "simd_im2col_gemm",
+      "im2col_gemm",
+      "ref"
+    ],
+    "Div": [
+      "simd",
+      "ref"
+    ],
+    "Flatten": [
+      "ref"
+    ],
+    "Gather": [
+      "ref"
+    ],
+    "GatherElements": [
+      "ref"
+    ],
+    "Gemm": [
+      "simd_direct",
+      "direct",
+      "ref"
+    ],
+    "GlobalAveragePool": [
+      "simd",
+      "ref"
+    ],
+    "LeakyRelu": [
+      "simd",
+      "ref"
+    ],
+    "MatMul": [
+      "simd_direct",
+      "ref"
+    ],
+    "MaxPool": [
+      "simd",
+      "ref"
+    ],
+    "Mod": [
+      "ref"
+    ],
+    "Mul": [
+      "simd",
+      "ref"
+    ],
+    "ReduceMax": [
+      "simd",
+      "ref"
+    ],
+    "ReduceMean": [
+      "simd",
+      "ref"
+    ],
+    "Relu": [
+      "simd",
+      "ref"
+    ],
+    "Reshape": [
+      "ref"
+    ],
+    "Resize": [
+      "simd",
+      "ref"
+    ],
+    "Sigmoid": [
+      "simd",
+      "ref"
+    ],
+    "Slice": [
+      "ref"
+    ],
+    "Softmax": [
+      "simd",
+      "ref"
+    ],
+    "Split": [
+      "ref"
+    ],
+    "Sub": [
+      "simd",
+      "ref"
+    ],
+    "Tile": [
+      "ref"
+    ],
+    "TopK": [
+      "ref"
+    ],
+    "Transpose": [
+      "simd",
+      "ref"
+    ],
+    "Unsqueeze": [
+      "ref"
+    ]
+  },
+  "cache": {
+    "l1_bytes": 65536,
+    "l2_bytes": 524288
+  }
+}

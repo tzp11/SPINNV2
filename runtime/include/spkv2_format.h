@@ -9,7 +9,7 @@ extern "C" {
 
 #define SPKV2_MAGIC 0x32564B50u /* 'PKV2' little-endian */
 #define SPKV2_VERSION_MAJOR 0u
-#define SPKV2_VERSION_MINOR 2u
+#define SPKV2_VERSION_MINOR 3u
 
 typedef enum {
     SPKV2_SECTION_METADATA = 1,
@@ -23,7 +23,8 @@ typedef enum {
     SPKV2_SECTION_QUANTIZATION = 9,
     SPKV2_SECTION_STRING_TABLE = 10,
     SPKV2_SECTION_DEBUG = 11,
-    SPKV2_SECTION_CHECKSUM = 12
+    SPKV2_SECTION_CHECKSUM = 12,
+    SPKV2_SECTION_PROTECTION_PLAN = 13
 } Spkv2SectionKind;
 
 #pragma pack(push, 1)
@@ -57,7 +58,9 @@ typedef struct {
 } Spkv2SectionEntry;
 
 typedef enum {
-    SPKV2_DTYPE_FP32 = 1
+    SPKV2_DTYPE_FP32 = 1,
+    SPKV2_DTYPE_INT8 = 2,
+    SPKV2_DTYPE_FP16 = 3
 } Spkv2DType;
 
 typedef enum {
@@ -101,7 +104,13 @@ typedef enum {
     SPKV2_OP_UNSQUEEZE = 22,
     SPKV2_OP_GATHERELEMENTS = 23,
     SPKV2_OP_TOPK = 24,
-    SPKV2_OP_CAST = 25
+    SPKV2_OP_CAST = 25,
+    SPKV2_OP_SLICE = 26,
+    SPKV2_OP_GATHER = 27,
+    SPKV2_OP_AVERAGEPOOL = 28,
+    SPKV2_OP_GLOBALAVGPOOL = 29,
+    SPKV2_OP_CLIP = 30,
+    SPKV2_OP_LEAKYRELU = 31
 } Spkv2OpType;
 
 typedef enum {
@@ -119,7 +128,10 @@ typedef enum {
     SPKV2_KERNEL_POINTWISE_1X1 = 5,
     SPKV2_KERNEL_DEPTHWISE_DIRECT = 6,
     SPKV2_KERNEL_WINOGRAD_3X3S1 = 7,
-    SPKV2_KERNEL_CONV3X3S2_DIRECT = 8
+    SPKV2_KERNEL_CONV3X3S2_DIRECT = 8,
+    SPKV2_KERNEL_WINOGRAD_F43 = 9,
+    SPKV2_KERNEL_INT8_IM2COL_GEMM = 10,
+    SPKV2_KERNEL_BNNS_FP32 = 11
 } Spkv2KernelKind;
 
 typedef struct {
@@ -161,13 +173,13 @@ typedef struct {
     int32_t trans_a;
     int32_t trans_b;
     float alpha;
+    float beta;
     int32_t extra_count;
     int32_t keepdims;
     int32_t extra[8];
     int32_t largest;
     int32_t sorted;
     int32_t cast_to;
-    int32_t reserved;
 } Spkv2AttrRecord;
 
 typedef struct {
@@ -195,6 +207,39 @@ typedef struct {
     uint32_t fallback_kernel_spec_id;
     uint32_t required_feature_mask;
 } Spkv2KernelSpecRecord;
+
+/* Per-channel quantization parameters (SECTION_QUANTIZATION).
+ * One record per quantized tensor. scale/zero_point arrays follow
+ * the record header at data_offset within the section. */
+typedef enum {
+    SPKV2_QUANT_NONE = 0,
+    SPKV2_QUANT_PER_TENSOR = 1,
+    SPKV2_QUANT_PER_CHANNEL = 2
+} Spkv2QuantScheme;
+
+typedef struct {
+    uint32_t tensor_id;
+    uint16_t scheme;        /* Spkv2QuantScheme */
+    uint16_t quant_axis;    /* channel axis for per-channel */
+    uint32_t num_channels;  /* 1 for per-tensor, C for per-channel */
+    uint64_t data_offset;   /* offset to scale[]/zero_point[] arrays in section */
+} Spkv2QuantParamRecord;
+
+typedef enum {
+    SPKV2_PROTECT_NONE = 0,
+    SPKV2_PROTECT_RANGE_GUARD_RERUN = 1,
+    SPKV2_PROTECT_DMR_COMPARE_RERUN = 2
+} Spkv2ProtectionMode;
+
+typedef struct {
+    uint32_t node_id;
+    uint32_t tensor_id;
+    uint16_t mode;
+    uint16_t flags;
+    float lower_bound;
+    float upper_bound;
+    uint64_t scratch_offset;
+} Spkv2ProtectionRecord;
 
 #pragma pack(pop)
 

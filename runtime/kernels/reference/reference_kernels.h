@@ -25,5 +25,11 @@ int kernel_tile(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
 int kernel_unsqueeze(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
 int kernel_gather_elements(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
 int kernel_topk(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_slice(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_gather(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_avgpool(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_global_avgpool(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_clip(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
+int kernel_leakyrelu(Spkv2Context *ctx, const Spkv2NodeRecord *node, void *scratch);
 
 #endif /* SPKV2_REFERENCE_KERNELS_H */
